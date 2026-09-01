@@ -34,6 +34,7 @@ from apps.orders.tests.factories import create_test_order, create_test_user
 from apps.payments.constants import (
     PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
     PAYMENT_STATUS_FAILED,
+    PAYMENT_STATUS_PENDING,
     PAYMENT_STATUS_PROCESSING,
     PAYMENT_STATUS_SUCCEEDED,
 )

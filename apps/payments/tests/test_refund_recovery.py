@@ -18,7 +18,8 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.db import connection
-from django.test import TestCase, TransactionTestCase, skipIf
+from django.test import TestCase, TransactionTestCase
+from unittest import skipIf
 
 from apps.orders.models.order import OrderStatus
 from apps.orders.services.order_service import OrderService

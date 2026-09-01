@@ -768,6 +768,89 @@ class PaymentService:
         return stats
 
     @staticmethod
+    def _record_refund_obligation(
+        payment: Payment,
+        *,
+        reason: str = '',
+        error: str = '',
+        user_id=None,
+        using: str | None = None,
+    ) -> bool:
+        """Ядро фиксации обязательства возврата (PROD-003).
+
+        Вызывается для УЖЕ заблокированного платежа. Устанавливает
+        refund_required_amount = amount и создаёт PaymentEvent
+        (refund_failed). Идемпотентно: если обязательство уже покрывает
+        оставшуюся сумму, ничего не меняется и событие не дублируется.
+        `using` — alias соединения (None = default).
+        """
+        remaining = payment.amount - payment.refund_amount
+        if remaining <= 0:
+            # Долга нет — состояние уже консистентно.
+            return True
+        if payment.refund_required_amount >= remaining:
+            # Обязательство уже зафиксировано — идемпотентный
+            # повторный вызов не создаёт дублирующих событий.
+            return True
+        requirement = payment.amount
+        payment_manager = (
+            Payment.objects.using(using) if using else Payment.objects
+        )
+        event_manager = (
+            PaymentEvent.objects.using(using) if using else PaymentEvent.objects
+        )
+        payment_manager.filter(pk=payment.pk).update(
+            refund_required_amount=requirement,
+        )
+        event_manager.create(
+            payment=payment,
+            event_type=PAYMENT_EVENT_REFUND_FAILED,
+            old_status=PAYMENT_STATUS_SUCCEEDED,
+            new_status=PAYMENT_STATUS_SUCCEEDED,
+            performed_by_id=user_id,
+            payload={
+                'error': error,
+                'refund_required_amount': str(requirement),
+            },
+            note=(
+                reason or
+                'Возврат не выполнен — зафиксировано обязательство '
+                'повторной попытки.'
+            ),
+        )
+        return True
+
+    @staticmethod
+    def record_refund_failure(
+        payment: Payment,
+        *,
+        reason: str = '',
+        error: str = '',
+        user_id=None,
+    ) -> bool:
+        """Зафиксировать обязательство возврата в собственной транзакции.
+
+        Для вызовов из здорового контекста (реконсиляция, команды):
+        метод сам блокирует строку платежа и пишет через default-
+        соединение. Возвращает True, если обязательство зафиксировано
+        (или уже было зафиксировано / долга нет).
+        """
+        with transaction.atomic():
+            locked = (
+                Payment.objects
+                .select_for_update()
+                .get(pk=payment.pk)
+            )
+            if locked.status != PAYMENT_STATUS_SUCCEEDED:
+                return False
+            return PaymentService._record_refund_obligation(
+                locked,
+                reason=reason,
+                error=error,
+                user_id=user_id,
+            )
+
+    @staticmethod
     def record_refund_failure_durable(
         payment_id: int,
         *,
@@ -775,17 +858,12 @@ class PaymentService:
         error: str = '',
         user_id=None,
     ) -> bool:
-        """Зафиксировать retryable-обязательство возврата (PROD-003).
+        """Зафиксировать обязательство возврата DURABLE (PROD-003).
 
         Пишет через выделенное audit-соединение, поэтому запись
         переживает откат/аборт основной транзакции (типовой сценарий —
         ошибка БД внутри OrderService.cancel(), когда обычная запись
         была бы откачена вместе с транзакцией).
-
-        Устанавливает refund_required_amount = amount (полный возврат
-        оставшейся суммы) и создаёт PaymentEvent(refund_failed).
-        Повторные вызовы идемпотентны. Возвращает True, если
-        обязательство зафиксировано.
         """
         _payments_audit_connection()
         alias = _PAYMENTS_AUDIT_ALIAS
@@ -798,33 +876,12 @@ class PaymentService:
                 )
                 if payment.status != PAYMENT_STATUS_SUCCEEDED:
                     return False
-                remaining = payment.amount - payment.refund_amount
-                if remaining <= 0:
-                    # Долга нет — состояние уже консистентно.
-                    return True
-                if payment.refund_required_amount >= remaining:
-                    # Обязательство уже зафиксировано — идемпотентный
-                    # повторный вызов не создаёт дублирующих событий.
-                    return True
-                requirement = payment.amount
-                Payment.objects.using(alias).filter(pk=payment.pk).update(
-                    refund_required_amount=requirement,
-                )
-                PaymentEvent.objects.using(alias).create(
-                    payment=payment,
-                    event_type=PAYMENT_EVENT_REFUND_FAILED,
-                    old_status=PAYMENT_STATUS_SUCCEEDED,
-                    new_status=PAYMENT_STATUS_SUCCEEDED,
-                    performed_by_id=user_id,
-                    payload={
-                        'error': error,
-                        'refund_required_amount': str(requirement),
-                    },
-                    note=(
-                        reason or
-                        'Возврат не выполнен — зафиксировано обязательство '
-                        'повторной попытки.'
-                    ),
+                return PaymentService._record_refund_obligation(
+                    payment,
+                    reason=reason,
+                    error=error,
+                    user_id=user_id,
+                    using=alias,
                 )
         except Payment.DoesNotExist:
             return False
@@ -836,7 +893,6 @@ class PaymentService:
                 extra={'payment_id': payment_id, 'error': str(exc)},
             )
             return False
-        return True
 
     @staticmethod
     def _fresh_order_status(order_id: int) -> str | None:
@@ -934,8 +990,8 @@ class PaymentService:
                 return 'confirm_failed'
 
         if order_status == OrderStatus.CANCELLED:
-            PaymentService.record_refund_failure_durable(
-                payment.pk,
+            PaymentService.record_refund_failure(
+                payment,
                 reason='Заказ отменён после оплаты — требуется возврат.',
                 error='order_cancelled_after_payment',
                 user_id=None,
