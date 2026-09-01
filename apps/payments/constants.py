@@ -97,6 +97,14 @@ PAYMENT_EVENT_CANCELLED = 'cancelled'
 PAYMENT_EVENT_CONFIRMED = 'confirmed'
 PAYMENT_EVENT_CALLBACK_RECEIVED = 'callback_received'
 PAYMENT_EVENT_ERROR = 'error'
+# PROD-003: отказ провайдера выполнить возврат. Означает «возврат ещё не
+# выполнен» — обязательство зафиксировано в Payment.refund_required_amount
+# и будет повторено через retry_pending_refunds / команду.
+PAYMENT_EVENT_REFUND_FAILED = 'refund_failed'
+# PROD-003: платёж подтверждён, но подтверждение заказа не удалось
+# (или заказ уже был в другом статусе). Событие делает расхождение
+# платёж↔заказ наблюдаемым и доступным для реконсиляции.
+PAYMENT_EVENT_ORDER_CONFIRM_FAILED = 'order_confirm_failed'
 
 PAYMENT_EVENT_CHOICES = (
     (PAYMENT_EVENT_CREATED, 'Платёж создан'),
@@ -104,9 +112,11 @@ PAYMENT_EVENT_CHOICES = (
     (PAYMENT_EVENT_WEBHOOK_RECEIVED, 'Вебхук получен'),
     (PAYMENT_EVENT_REFUND_INITIATED, 'Возврат инициирован'),
     (PAYMENT_EVENT_REFUND_COMPLETED, 'Возврат завершён'),
+    (PAYMENT_EVENT_REFUND_FAILED, 'Возврат не выполнен'),
     (PAYMENT_EVENT_CANCELLED, 'Платёж отменён'),
     (PAYMENT_EVENT_CONFIRMED, 'Платёж подтверждён'),
     (PAYMENT_EVENT_CALLBACK_RECEIVED, 'Callback получен'),
+    (PAYMENT_EVENT_ORDER_CONFIRM_FAILED, 'Подтверждение заказа не удалось'),
     (PAYMENT_EVENT_ERROR, 'Ошибка'),
 )
 

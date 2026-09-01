@@ -143,6 +143,24 @@ class StockMovement(BaseModel):
         verbose_name='Выполнил',
     )
 
+    # related_movement — связь парных движений (PROD-003).
+    # RELEASE ссылается на своё RESERVE, OUT ссылается на своё RESERVE.
+    # Парность — основа идемпотентности release_stock()/commit_stock():
+    # повторный или конкурентный вызов обрабатывает только «непарные»
+    # RESERVE-движения и не может списать/освободить сток дважды.
+    # null=True — одиночные движения (IN, ADJUSTMENT) и движения,
+    # созданные до PROD-003.
+    # on_delete=SET_NULL — при удалении исходного движения парное
+    # остаётся в аудите.
+    related_movement = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='counter_movements',
+        verbose_name='Связанное движение',
+    )
+
     # note — комментарий к движению.
     # Примеры: «Приёмка по накладной №12345», «Инвентаризация: найдено 5 бракованных»
     note = models.CharField(

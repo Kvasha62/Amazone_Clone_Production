@@ -194,6 +194,23 @@ class Payment(BaseModel):
         default=Decimal('0.00'),
         validators=[MinValueValidator(Decimal('0'))],
     )
+    # refund_required_amount — сколько средств ЕЩЁ должно быть возвращено
+    # (накопительное обязательство, PROD-003).
+    #
+    # PROD-003: если возврат провалился (отказ провайдера, сбой БД), сюда
+    # записывается сумма, которую необходимо вернуть. Пока
+    # refund_amount < refund_required_amount, платёж остаётся SUCCEEDED,
+    # но имеет явное retryable-обязательство: его подхватывает
+    # PaymentService.retry_pending_refunds() и команда
+    # `python manage.py retry_pending_refunds`.
+    # Обычные успешные возвраты НЕ создают обязательства (0 = нет долга).
+    refund_required_amount = models.DecimalField(
+        verbose_name='Сумма возврата к исполнению',
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0'))],
+    )
 
     # ──────────────────────────────────────────────────────────────
     # Данные внешней платёжной системы
@@ -317,6 +334,14 @@ class Payment(BaseModel):
         condition=models.Q(refund_amount__lte=models.F('amount')),
                 name='payment_refund_lte_amount',
             ),
+            # PROD-003: обязательство возврата не может превышать сумму
+            # платежа (накопительное обязательство ≤ amount).
+            models.CheckConstraint(
+                condition=models.Q(
+                    refund_required_amount__lte=models.F('amount'),
+                ),
+                name='payment_refund_required_lte_amount',
+            ),
         ]
 
     def __str__(self):
@@ -339,6 +364,17 @@ class Payment(BaseModel):
     def is_refundable(self) -> bool:
         """True если платёж можно вернуть (SUCCEEDED)."""
         return self.status == PAYMENT_STATUS_SUCCEEDED
+
+    @property
+    def refund_pending_amount(self) -> Decimal:
+        """Сумма возврата, которая ещё не исполнена (PROD-003).
+
+        > 0 → платёж имеет retryable-обязательство возврата:
+        retry_pending_refunds() должен довести refund_amount до
+        refund_required_amount.
+        """
+        pending = self.refund_required_amount - self.refund_amount
+        return pending if pending > 0 else Decimal('0.00')
 
     def save(self, *args, **kwargs):
         """

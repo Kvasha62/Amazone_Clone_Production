@@ -70,6 +70,62 @@ class InventoryService:
         return stock
 
     @staticmethod
+    def _locked_order(order):
+        """SELECT ... FOR UPDATE по строке заказа (PROD-003).
+
+        Сериализует резервирование/освобождение/списание ОДНОГО заказа
+        между конкурентными вызовами: все операции начинаются с лока
+        заказа и только потом лочат строки Stock (единый lock order
+        Order → Stock исключает deadlock между этими путями). Блокировка
+        держится до COMMIT; повторный захват в транзакции, уже
+        удерживающей лок (OrderService.transition_status), безопасен.
+        """
+        from apps.orders.models import Order
+
+        return Order.objects.select_for_update().get(pk=order.pk)
+
+    @staticmethod
+    @transaction.atomic
+    def reconcile_order(order) -> dict:
+        """Восстановить согласованность стока для заказа (PROD-003).
+
+        Идемпотентно применяет недостающие операции по статусу заказа:
+          • CONFIRMED / PROCESSING / SHIPPED без RESERVE → reserve_stock();
+          • CANCELLED с непарными RESERVE → release_stock();
+          • DELIVERED с непарными RESERVE → commit_stock().
+        Каждая операция сама по себе идемпотентна (movement-pairing),
+        поэтому повторный запуск безопасен. Возвращает отчёт
+        {'order_id', 'order_status', 'actions'}.
+        """
+        from apps.orders.models.order import OrderStatus
+
+        locked = InventoryService._locked_order(order)
+        status = locked.status
+        actions = []
+
+        if status in (
+            OrderStatus.CONFIRMED,
+            OrderStatus.PROCESSING,
+            OrderStatus.SHIPPED,
+        ):
+            if InventoryService.reserve_stock(locked):
+                actions.append('reserved')
+
+        elif status == OrderStatus.CANCELLED:
+            if InventoryService.release_stock(locked):
+                actions.append('released')
+
+        elif status == OrderStatus.DELIVERED:
+            if InventoryService.commit_stock(locked):
+                actions.append('committed')
+
+        return {
+            'order_id': locked.pk,
+            'order_status': status,
+            'actions': actions,
+        }
+
+    @staticmethod
     def get_available_quantity(variant) -> int:
         """
         Возвращает доступное количество для варианта.
@@ -112,8 +168,22 @@ class InventoryService:
         """
         from apps.orders.models import OrderItem
 
+        # PROD-003: лок заказа сериализует все операции стока этого
+        # заказа (Order → Stock); повторный/конкурентный reserve
+        # одного заказа невозможен.
+        InventoryService._locked_order(order)
+
         items = order.items.select_related('variant').all()
         if not items:
+            return []
+
+        # PROD-003: идемпотентность — если заказ уже зарезервирован,
+        # повторный вызов ничего не делает (повторный increment
+        # reserved_quantity невозможен).
+        if StockMovement.objects.filter(
+            order=order,
+            kind=MovementKind.RESERVE,
+        ).exists():
             return []
 
         movements = []
@@ -212,10 +282,24 @@ class InventoryService:
           OrderItem мог быть изменён после резервирования —
           movement.delta содержит точное значение.
         """
-        reserve_movements = StockMovement.objects.filter(
+        # PROD-003: лок заказа (Order → Stock) сериализует release
+        # против конкурентных release/commit/reserve этого заказа.
+        InventoryService._locked_order(order)
+
+        # PROD-003: обрабатываем только RESERVE-движения, у которых ещё
+        # НЕТ парного RELEASE. Повторный/конкурентный вызов — no-op:
+        # повторный decrement reserved_quantity невозможен.
+        released_reserve_ids = StockMovement.objects.filter(
             order=order,
-            kind=MovementKind.RESERVE,
-        ).select_related('stock')
+            kind=MovementKind.RELEASE,
+            related_movement__isnull=False,
+        ).values('related_movement_id')
+        reserve_movements = (
+            StockMovement.objects
+            .filter(order=order, kind=MovementKind.RESERVE)
+            .exclude(pk__in=released_reserve_ids)
+            .select_related('stock')
+        )
 
         movements = []
         for mv in reserve_movements:
@@ -235,6 +319,7 @@ class InventoryService:
                 quantity_before=quantity_before,
                 quantity_after=quantity_before,
                 order=order,
+                related_movement=mv,
                 note=f'Освобождение резерва (отмена {order.order_number})',
             )
             movements.append(movement)
@@ -276,10 +361,30 @@ class InventoryService:
           Резерв больше не нужен → reserved -= delta.
           Итог: available = (quantity - delta) - (reserved - delta) = available — не изменился.
         """
-        reserve_movements = StockMovement.objects.filter(
+        # PROD-003: лок заказа (Order → Stock) сериализует commit
+        # против конкурентных release/commit/reserve этого заказа.
+        InventoryService._locked_order(order)
+
+        # PROD-003: списываем только RESERVE-движения, у которых ещё нет
+        # парного OUT и которые не были освобождены (RELEASE). Повторный/
+        # конкурентный вызов — no-op: повторное списание невозможно.
+        committed_reserve_ids = StockMovement.objects.filter(
             order=order,
-            kind=MovementKind.RESERVE,
-        ).select_related('stock')
+            kind=MovementKind.OUT,
+            related_movement__isnull=False,
+        ).values('related_movement_id')
+        released_reserve_ids = StockMovement.objects.filter(
+            order=order,
+            kind=MovementKind.RELEASE,
+            related_movement__isnull=False,
+        ).values('related_movement_id')
+        reserve_movements = (
+            StockMovement.objects
+            .filter(order=order, kind=MovementKind.RESERVE)
+            .exclude(pk__in=committed_reserve_ids)
+            .exclude(pk__in=released_reserve_ids)
+            .select_related('stock')
+        )
 
         movements = []
         for mv in reserve_movements:
@@ -300,6 +405,7 @@ class InventoryService:
                 quantity_before=quantity_before,
                 quantity_after=quantity_before - mv.delta,
                 order=order,
+                related_movement=mv,
                 note=f'Списание (доставка {order.order_number})',
             )
             movements.append(movement)
