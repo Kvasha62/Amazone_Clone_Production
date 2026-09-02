@@ -1,6 +1,59 @@
-# Production Baseline — PROD-011
+# Production Baseline — PROD-013
 
 ## Approved baseline commit
+
+| Field | Value |
+|---|---|
+| Repository | `Kvasha62/Amazone_Clone_Production` |
+| Branch | `main` |
+| Approved baseline SHA | `1b4f069c159b198d30ee82a71b65198ce11bd2b7` |
+| Baseline commit title | `Merge pull request #24 from Kvasha62/arena/01a06248-amazone-clone-production` |
+| CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run #42 / ID `33636809167`, job/check `ci` (ID `100269608813`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; Django system checks, migration check, migration application, and the full test suite all succeeded; run completed 2026-09-02T13:40:15Z |
+| Approved on | 2026-09-02 |
+| Ticket | PROD-013 |
+
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`1b4f069c159b198d30ee82a71b65198ce11bd2b7` is the authoritative production
+state. It is the merge commit for completed PROD-012 (PR #24). Earlier baseline
+records are preserved below as history.
+
+## Verification performed (read-only)
+
+1. GitHub `main`, local `main`, and `origin/main` all resolve to `1b4f069c159b198d30ee82a71b65198ce11bd2b7` — an exact match with the current production baseline SHA (verified 2026-09-02).
+2. GitHub Actions workflow `CI`, run #42 / ID `33636809167`: `head_sha` = `1b4f069c159b198d30ee82a71b65198ce11bd2b7` (exact match), event `push`, status `completed`, conclusion `success`, completed 2026-09-02T13:40:15Z; job `ci` (ID `100269608813`) is `completed` / `success`.
+3. Every CI job step succeeded on the baseline SHA: `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks`, `Migration check`, `Apply migrations`, and `Run tests` all concluded `success`.
+4. PROD-012 / PR #24 is `MERGED` / completed (merged 2026-09-02T13:36:56Z); its merge commit is exactly `1b4f069c159b198d30ee82a71b65198ce11bd2b7`. CI on its final PR HEAD `051f6ab31fdede888446c65868c00a92ded234af` was also green (run #41 / ID `33636174754`, check `ci` ID `100267488189` — `completed` / `success`).
+5. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+6. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-013 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-013 — Advance production baseline after PROD-012 (Issue #25) |
+| Status | Documentation-only governance change; pending Architect review and Owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `406a96c37b0d0249ea7f44b459a54dca8566561b` → `1b4f069c159b198d30ee82a71b65198ce11bd2b7` (`main`) |
+| Completed production change | PROD-012 / PR #24 — merged 2026-09-02 |
+| Verified on | 2026-09-02 |
+
+PROD-012 is recorded as completed/merged via PR #24
+(`PROD-012: Harden ShippingService synchronous exception handling (F-14)`).
+Its ShippingService synchronous exception-handling hardening (F-14) is part of
+the verified `main` state. No functional, model, schema, migration, dependency,
+CI workflow, deployment, or educational-repository changes are introduced by
+PROD-013. All other remaining audit findings are outside this ticket and remain
+unchanged. Architect review is required before the Owner performs the final
+merge; the Architect/Assistant must not merge this governance pull request.
+
+## Historical baseline record — PROD-011 (superseded)
+
+This record was current immediately before PROD-013. It is preserved for audit
+and is now superseded by the approved baseline at the top of this document.
 
 | Field | Value |
 |---|---|
@@ -14,29 +67,13 @@
 | Approved on | 2026-09-02 |
 | Ticket | PROD-011 |
 
-Production `main` points exactly at this SHA. This commit is the current
-production source-of-truth commit and the frozen reference point for every
-subsequent production change. `main` at
-`406a96c37b0d0249ea7f44b459a54dca8566561b` is the authoritative production
-state. It is the merge commit for completed PROD-010 (PR #20). Earlier baseline
-records are preserved below as history.
-
-## Verification performed (read-only)
-
-1. GitHub `main`, local `main`, and `origin/main` all resolve to `406a96c37b0d0249ea7f44b459a54dca8566561b` — an exact match with the current production baseline SHA (verified 2026-09-02).
-2. GitHub Actions workflow `CI`, run #38 / ID `33633045879`: `head_sha` = `406a96c37b0d0249ea7f44b459a54dca8566561b` (exact match), status `completed`, conclusion `success`; job `ci` (ID `100256993637`) is `completed` / `success`.
-3. Every substantive CI job step succeeded, including Django system checks, migration check, migration application, and the full test suite.
-4. PROD-010 / PR #20 is `MERGED` / completed; its merge commit is exactly `406a96c37b0d0249ea7f44b459a54dca8566561b`.
-5. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
-6. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
-
-## Baseline advance — PROD-011 (this document)
+## Baseline advance — PROD-011 (merged; record preserved)
 
 | Field | Value |
 |---|---|
 | Ticket | PROD-011 — Advance production baseline after PROD-010 (Issue #21) |
-| Status | Documentation-only governance change; pending Architect review and Owner merge |
-| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Status | Documentation-only governance change; merged and completed |
+| Change class | That pull request changed only `docs/production/PRODUCTION_BASELINE.md` |
 | Advance | Previous baseline `27fc2c3b2aca17db8656e4381464ff52022fab70` → `406a96c37b0d0249ea7f44b459a54dca8566561b` (`main`) |
 | Completed production change | PROD-010 / PR #20 — merged 2026-09-02 |
 | Verified on | 2026-09-02 |
@@ -44,10 +81,7 @@ records are preserved below as history.
 PROD-010 is recorded as completed/merged via PR #20. Its PostgreSQL-sequence
 order-number allocation and concurrency fix (F-13) are part of the verified
 `main` state. No functional, model, schema, migration, dependency, CI workflow,
-deployment, or educational-repository changes are introduced by PROD-011. F-14
-and all other remaining audit findings are outside this ticket and remain
-unchanged. Architect review is required before the Owner performs the final
-merge; the Architect/Assistant must not merge this governance pull request.
+deployment, or educational-repository changes were introduced by PROD-011.
 
 ## Historical baseline record — PROD-009 (superseded)
 
