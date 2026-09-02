@@ -1,0 +1,242 @@
+# ────────────────────────────────────────────────────────────────────────
+# docker-compose.prod.yml — PROD-008 / F-12 КАННИЧЕСКАЯ production-конфигурация.
+#
+# Единственный поддерживаемый способ запуска приложения в production:
+#   nginx (edge: static/media/proxy) → gunicorn (web) → PostgreSQL 18,
+#   Redis 7 (broker/backend), Celery worker, Celery Beat.
+#
+# Запуск (полная инструкция — docs/production/DEPLOYMENT.md):
+#   cp .env.production.example .env.production   # заполнить секреты
+#   ./scripts/prod.sh up                         # или:
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# Fail-closed контракт (PROD-007 / Issue #15 §3):
+#   • файл .env.production обязателен (env_file) и переменные
+#     POSTGRES_PASSWORD / DJANGO_ALLOWED_HOSTS — обязательны для старта
+#     (синтаксис ${VAR:?}): без них compose откажется подниматься;
+#   • DJANGO_DEBUG жёстко "False" на каждом сервисе — .env.production
+#     не может перевести прод в debug-режим;
+#   • DJANGO_SECRET_KEY без значения → Django упадёт с
+#     ImproperlyConfigured (fail closed), а не загрузит дефолт;
+#   • DB_HOST/DB_PORT/REDIS_URL задаются топологией стека и не берутся
+#     из .env.production.
+#
+# Этот файл НЕ используется для разработки: разработка — docker-compose.yml.
+# ────────────────────────────────────────────────────────────────────────
+
+name: amazone-clone-prod
+
+services:
+  # ── PostgreSQL 18 (единственная поддерживаемая БД, AC-5) ──
+  db:
+    image: postgres:18
+    container_name: amazone-clone-prod-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-amazonclone}
+      POSTGRES_USER: ${POSTGRES_USER:-amazonclone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.production}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-amazonclone} -d ${POSTGRES_DB:-amazonclone}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    mem_limit: 1g
+    # Порт наружу НЕ публикуется: доступ только внутри сети стека.
+
+  # ── Redis 7 (Celery broker/result backend; AOF-персистентность) ──
+  redis:
+    image: redis:7-alpine
+    container_name: amazone-clone-prod-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    mem_limit: 512m
+    # Порт наружу НЕ публикуется.
+
+  # ── Django API через Gunicorn (production WSGI, AC-2) ──
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend.prod
+    image: amazone-clone-backend:prod
+    container_name: amazone-clone-prod-web
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      # Production-режим задан конфигурацией стека и не переопределяется.
+      DJANGO_DEBUG: "False"
+      DB_ENGINE: django.db.backends.postgresql
+      # Топология зависимостей стека — не из .env.production.
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-amazonclone}
+      DB_USER: ${POSTGRES_USER:-amazonclone}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.production}
+      REDIS_URL: redis://redis:6379/0
+      # Публичные хосты из .env.production + внутренние имена для healthcheck'ов.
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:?DJANGO_ALLOWED_HOSTS must be set in .env.production},web,localhost,127.0.0.1"
+      # Детерминированный startup (entrypoint): БД → миграции → static.
+      RUN_MIGRATIONS: "true"
+      RUN_COLLECTSTATIC: "true"
+    command: >
+      gunicorn config.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers ${GUNICORN_WORKERS:-3}
+      --timeout ${GUNICORN_TIMEOUT:-60}
+      --graceful-timeout 30
+      --max-requests 500
+      --max-requests-jitter 50
+      --forwarded-allow-ips "*"
+      --access-logfile -
+      --error-logfile -
+    expose:
+      - "8000"            # только внутри стека; наружу — nginx
+    volumes:
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Readiness: приложение + БД (см. apps/core/health_urls.py: 503 если БД недоступна).
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/', timeout=5).getcode() == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s   # первый boot: миграции + collectstatic
+    stop_grace_period: 40s
+    mem_limit: 1g
+
+  # ── Celery worker (независимо от web, AC-6) ──
+  celery:
+    image: amazone-clone-backend:prod
+    build:
+      context: .
+      dockerfile: Dockerfile.backend.prod
+    container_name: amazone-clone-prod-celery
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_DEBUG: "False"
+      DB_ENGINE: django.db.backends.postgresql
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-amazonclone}
+      DB_USER: ${POSTGRES_USER:-amazonclone}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.production}
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:?DJANGO_ALLOWED_HOSTS must be set in .env.production},web,localhost,127.0.0.1"
+      # Миграции/collectstatic выполняет только web — без гонок.
+      RUN_MIGRATIONS: "false"
+      RUN_COLLECTSTATIC: "false"
+    # -Q: все очереди, реально используемые config/celery.py (task_routes:
+    # orders/cart/reviews + default "celery").
+    command: >
+      celery -A config worker
+      --loglevel=info
+      -Q celery,orders,cart,reviews
+      --max-tasks-per-child=100
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A config inspect ping --timeout 10 -d celery@$$(hostname)"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 45s
+    stop_grace_period: 30s
+    mem_limit: 1g
+
+  # ── Celery Beat (шедулер, отдельно от worker, AC-6) ──
+  celery-beat:
+    image: amazone-clone-backend:prod
+    build:
+      context: .
+      dockerfile: Dockerfile.backend.prod
+    container_name: amazone-clone-prod-celery-beat
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_DEBUG: "False"
+      DB_ENGINE: django.db.backends.postgresql
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-amazonclone}
+      DB_USER: ${POSTGRES_USER:-amazonclone}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.production}
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_ALLOWED_HOSTS: "${DJANGO_ALLOWED_HOSTS:?DJANGO_ALLOWED_HOSTS must be set in .env.production},web,localhost,127.0.0.1"
+      RUN_MIGRATIONS: "false"
+      RUN_COLLECTSTATIC: "false"
+    # -s: файл расписания на персистентном volume (переживает рестарт).
+    command: >
+      celery -A config beat
+      --loglevel=info
+      --schedule /app/celerybeat-data/celerybeat-schedule
+    volumes:
+      - beatdata:/app/celerybeat-data
+    depends_on:
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+    # Для beat нет дешёвого in-process healthcheck: liveness = restart policy
+    # + `docker compose ps` (см. DEPLOYMENT.md «Health verification»).
+
+  # ── Nginx: edge (static/media/proxy), единственный публичный порт ──
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: amazone-clone-prod-nginx
+    restart: unless-stopped
+    ports:
+      - "${PROD_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./docker/production/nginx.conf:/etc/nginx/nginx.conf:ro
+      - static_data:/app/staticfiles:ro
+      - media_data:/app/media:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/healthz/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 256m
+
+# ── Персистентные данные (backup/recovery — DEPLOYMENT.md) ──
+volumes:
+  pgdata:
+    name: amazone-clone-prod-pgdata
+  media_data:
+    name: amazone-clone-prod-media
+  static_data:
+    name: amazone-clone-prod-static
+  redisdata:
+    name: amazone-clone-prod-redis
+  beatdata:
+    name: amazone-clone-prod-beat

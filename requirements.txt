@@ -42,6 +42,13 @@ django-treebeard>=4.7.1
 # .env support
 python-dotenv>=1.0
 
+# Production WSGI-сервер (PROD-008 / F-12; docker-compose.prod.yml → web)
+gunicorn>=23.0
+
+# Разбор YAML deployment-конфигурации в тестах
+# (config/tests/test_deployment_config.py; CI = manage.py test)
+PyYAML>=6.0
+
 # Pillow (ImageField for products, brands)
 Pillow>=10.0
 

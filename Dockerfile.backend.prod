@@ -1,0 +1,64 @@
+# ────────────────────────────────────────────────────────────────────────
+# Dockerfile.backend.prod — PROD-008 / F-12 production backend image.
+#
+# Отличия от Dockerfile.backend (dev):
+#   • исходники копируются в образ (нет bind-mount для live-reload);
+#   • приложение запускается через Gunicorn (WSGI), а не runserver;
+#   • контейнер работает от непривилегированного пользователя `app`;
+#   • код принадлежит root (пользователь app не может его изменить),
+#     записываемые каталоги (media/staticfiles/celerybeat) — пользователю app.
+#
+# Сборка (из корня репозитория):
+#   docker build -f Dockerfile.backend.prod -t amazone-clone-backend:prod .
+#
+# Канонический запуск — docker-compose.prod.yml (см. docs/production/DEPLOYMENT.md).
+# ────────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Все зависимости из requirements.txt поставляются бинарными wheel'ами
+# (psycopg[binary], Pillow) — компиляторы и dev-заголовки не нужны.
+# hadolint: не используем apt — образ меньше, поверхность атаки меньше.
+
+# Непривилегированный пользователь (AC-2: run as non-root).
+RUN groupadd --system app && useradd --system --gid app --home /app app
+
+WORKDIR /app
+
+# 1) Сначала только requirements.txt — кэш слоя Docker при смене кода.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 2) Код приложения (последний слой — при разработке не перезаписывается).
+COPY . .
+
+# 3) Записываемые каталоги для named volumes (PROD-008 §6):
+#    пустой named volume при первом монтировании наследует владельца из образа.
+RUN mkdir -p /app/media /app/staticfiles /app/celerybeat-data \
+    && chown -R app:app /app/media /app/staticfiles /app/celerybeat-data \
+    && chmod +x /app/docker/production/entrypoint.sh /app/docker/production/wait_for_db.py
+
+# Код остаётся принадлежащим root: процесс под `app` не может изменить код.
+USER app
+
+EXPOSE 8000
+
+# Точка входа: ожидание БД → миграции/collectstatic (по флагам) → exec CMD.
+ENTRYPOINT ["/app/docker/production/entrypoint.sh"]
+
+# Production WSGI-сервер. Docker Compose продакшн-стека переопределяет
+# аргументы (число воркеров и таймауты — через переменные окружения).
+CMD ["gunicorn", "config.wsgi:application", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "3", \
+     "--timeout", "60", \
+     "--graceful-timeout", "30", \
+     "--max-requests", "500", \
+     "--max-requests-jitter", "50", \
+     "--forwarded-allow-ips", "*", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]
