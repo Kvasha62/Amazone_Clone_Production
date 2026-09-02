@@ -4,8 +4,10 @@
 # PROD-015 — regression coverage для ограниченного по времени раннера
 # конкурентных тестов (apps/core/tests/concurrency.py).
 #
-# Тесты НЕ трогают БД (SimpleTestCase): проверяется только семантика
-# таймаута/teardown/cleanup, ради которой раннер и заведён.
+# Тесты НЕ трогают БД (SimpleTestCase): проверяется семантика
+# таймаута/teardown/cleanup самого раннера. DB-гарантия (принудительное
+# освобождение тестовой БД от сессий зависших воркеров) покрыта
+# отдельно — apps/core/tests/test_concurrency_db.py (PostgreSQL).
 # ────────────────────────────────────────────────────────────────────────
 
 import threading
@@ -77,16 +79,62 @@ class RunConcurrentJobsTests(SimpleTestCase):
             return 'late'
 
         started = monotonic()
-        run = run_concurrent_jobs([lambda: 'fast', stuck], timeout=1)
+        run = run_concurrent_jobs(
+            [lambda: 'fast', stuck], timeout=1, grace_join=0.2,
+        )
         elapsed = monotonic() - started
 
         self.assertTrue(run.timed_out)
         self.assertEqual(run.stuck, ['concurrent-job-1'])
+        self.assertEqual(run.still_alive, ['concurrent-job-1'])
         self.assertEqual(run.results, ['fast'])
         self.assertLess(elapsed, 10, 'Ожидание не ограничено таймаутом')
         report = run.stuck_report()
         self.assertIn('concurrent-job-1', report)
         self.assertIn('стек потока concurrent-job-1', report)
+
+    def test_timeout_is_not_cancelled_by_late_unwinding_worker(self):
+        """
+        Воркер, развернувшийся уже ПОСЛЕ дедлайна (например, потому что
+        его серверную сессию убил реапер), не должен «отменять» факт
+        таймаута: run.stuck фиксируется на дедлайне.
+        """
+        release = threading.Event()
+
+        def stuck():
+            release.wait(timeout=60)
+            return 'late'
+
+        def unblock():
+            # Имитируем реапинг: воркер разворачивается во время
+            # grace-join, но тест обязан остаться проваленным.
+            release.set()
+
+        started = monotonic()
+        run = run_concurrent_jobs([stuck], timeout=0.5, grace_join=5)
+        # Разблокируем сразу после фиксации stuck — join grace завершится.
+        unblock()
+        run_after = run_concurrent_jobs([lambda: 'ok'], timeout=5)
+        elapsed = monotonic() - started
+
+        self.assertTrue(run.timed_out)
+        self.assertEqual(run.stuck, ['concurrent-job-0'])
+        self.assertEqual(run_after.results, ['ok'])
+        self.assertLess(elapsed, 20)
+
+    def test_no_database_access_when_no_worker_backend_registered(self):
+        """
+        Реапер обращается к БД только если воркер реально создал
+        соединение (и только для зависших потоков).
+        """
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        run_concurrent_jobs(
+            [lambda: release.wait(timeout=60)], timeout=0.5, grace_join=0.1,
+        )
+
+        self.connections_mock.create_connection.assert_not_called()
 
     def test_total_wait_is_bounded_by_single_deadline(self):
         """
@@ -100,7 +148,9 @@ class RunConcurrentJobsTests(SimpleTestCase):
             release.wait(timeout=60)
 
         started = monotonic()
-        run = run_concurrent_jobs([stuck, stuck, stuck, stuck], timeout=1)
+        run = run_concurrent_jobs(
+            [stuck, stuck, stuck, stuck], timeout=1, grace_join=0.2,
+        )
         elapsed = monotonic() - started
 
         self.assertTrue(run.timed_out)
@@ -121,7 +171,7 @@ class RunConcurrentJobsTests(SimpleTestCase):
             seen.append(threading.current_thread().daemon)
             release.wait(timeout=60)
 
-        run_concurrent_jobs([stuck], timeout=1)
+        run_concurrent_jobs([stuck], timeout=1, grace_join=0.1)
 
         self.assertEqual(seen, [True])
 
@@ -172,7 +222,9 @@ class ConcurrentJobsMixinTests(SimpleTestCase):
         self.addCleanup(release.set)
 
         def test_method(case):
-            case.run_concurrent_jobs([lambda: release.wait(timeout=60)])
+            case.run_concurrent_jobs(
+                [lambda: release.wait(timeout=60)], grace_join=0.2,
+            )
 
         started = monotonic()
         result = self._run_case(test_method)
