@@ -19,8 +19,6 @@ from unittest.mock import patch
 from django.core.management import call_command
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
-from unittest import skipIf
-
 from apps.orders.models.order import OrderStatus
 from apps.orders.services.order_service import OrderService
 from apps.orders.tests.factories import create_test_order, create_test_user
@@ -197,14 +195,15 @@ class CancelWithRefundFailureTests(TestCase):
         self.assertEqual(self.payment.status, PAYMENT_STATUS_REFUNDED)
 
 
-@skipIf(
-    connection.vendor == 'sqlite',
-    'durable-соединение требует PostgreSQL (SQLite :memory: изолирован)',
-)
 class RecordRefundFailureDurableTests(TransactionTestCase):
-    """Durable-фиксация обязательства через выделенное соединение."""
+    """Durable-фиксация обязательства через независимое соединение."""
 
     def setUp(self):
+        if connection.vendor != 'postgresql':
+            self.skipTest(
+                'durable-запись требует PostgreSQL: независимое '
+                'psycopg-соединение; SQLite (:memory:) изолирован',
+            )
         self.user = create_test_user()
         self.order = create_test_order(self.user)
         self.payment = create_test_payment(

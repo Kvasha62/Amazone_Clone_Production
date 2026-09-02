@@ -59,25 +59,6 @@ from apps.payments.models import Payment, PaymentEvent
 
 logger = logging.getLogger(__name__)
 
-# PROD-003: выделенный alias соединения для durable audit-записей,
-# которые должны пережить откат/аборт основной транзакции
-# (например, фиксация обязательства возврата после ошибки БД внутри
-# OrderService.cancel()). Регистрируется лениво; настройки копируются
-# из соединения default.
-_PAYMENTS_AUDIT_ALIAS = 'payments_audit'
-
-
-def _payments_audit_connection():
-    """Зарегистрировать (если нужно) и вернуть audit-соединение."""
-    from django.db import connections
-
-    if _PAYMENTS_AUDIT_ALIAS not in connections.databases:
-        connections.databases[_PAYMENTS_AUDIT_ALIAS] = dict(
-            connections.databases['default'],
-        )
-    return connections[_PAYMENTS_AUDIT_ALIAS]
-
-
 class PaymentService:
     """
     Бизнес-логика платежей.
@@ -860,37 +841,212 @@ class PaymentService:
     ) -> bool:
         """Зафиксировать обязательство возврата DURABLE (PROD-003).
 
-        Пишет через выделенное audit-соединение, поэтому запись
-        переживает откат/аборт основной транзакции (типовой сценарий —
+        Пишет через НЕЗАВИСИМОЕ psycopg-соединение (строится из настроек
+        alias'а default, без участия Django ORM), поэтому запись
+        переживает откат/аборт основной транзакции — типовой сценарий:
         ошибка БД внутри OrderService.cancel(), когда обычная запись
-        была бы откачена вместе с транзакцией).
+        была бы откачена вместе с транзакцией.
+
+        ПОЧЕМУ НЕ alias DATABASES['payments_audit']:
+          • тест-раннер блокирует соединения к alias'ам, не объявленным
+            в TestCase.databases (DatabaseOperationForbidden), а в рантайме
+            alias — это отдельный connection pool без преимуществ;
+          • независимое соединение — это классический outbox-паттерн
+            и единственный механизм, который гарантированно переживает
+            аборт несущей транзакции.
+
+        ГАРАНТИЯ НЕБЛОКИРОВКИ (guard in_atomic_block):
+          вызов возможен внутри атомарного блока вызывающего кода
+          (cancel() так и делает). Если строка платежа удерживается
+          несущей транзакцией, UPDATE на независимом соединении мог бы
+          висеть вечно (самоблокировка на одном потоке) — поэтому
+          соединение создаётся с lock_timeout/statement_timeout:
+          провал ограничен во времени и возвращает False + CRITICAL.
+          (Классический трюк с CHECKPOINT-пробой здесь не используется:
+          CHECKPOINT требует привилегий pg_checkpoint и недопустим как
+          runtime-зависимость; состояние транзакции несущего соединения
+          читается напрямую через in_atomic_block.)
+
+        Идемпотентность: UPDATE выполняется с guard-условием
+        (refund_required_amount < amount - refund_amount), повторный
+        вызов не дублирует ни обязательство, ни событие refund_failed.
+        True возвращается ТОЛЬКО если обязательство гарантированно
+        зафиксировано в БД (или уже было зафиксировано ранее).
         """
-        _payments_audit_connection()
-        alias = _PAYMENTS_AUDIT_ALIAS
-        try:
-            with transaction.atomic(using=alias):
-                payment = (
-                    Payment.objects.using(alias)
-                    .select_for_update()
-                    .get(pk=payment_id)
-                )
-                if payment.status != PAYMENT_STATUS_SUCCEEDED:
-                    return False
-                return PaymentService._record_refund_obligation(
-                    payment,
-                    reason=reason,
-                    error=error,
-                    user_id=user_id,
-                    using=alias,
-                )
-        except Payment.DoesNotExist:
+        from django.db import connections
+        from django.db import transaction as django_transaction
+
+        connection = connections['default']
+        if connection.vendor != 'postgresql':
+            # Durable-гарантия возможна только на PostgreSQL: независимое
+            # соединение к той же БД — на SQLite это другая (изолированная)
+            # in-memory/файловая БД, запись не была бы видна приложению.
+            logger.critical(
+                'record_refund_failure_durable_failed',
+                extra={
+                    'payment_id': payment_id,
+                    'error': (
+                        f'durable recording requires PostgreSQL backend, '
+                        f'got {connection.vendor!r}'
+                    ),
+                },
+            )
             return False
+
+        try:
+            import psycopg
+            from psycopg.types.json import Jsonb
+        except ImportError as exc:  # pragma: no cover — requirements.txt
+            logger.critical(
+                'record_refund_failure_durable_failed',
+                extra={'payment_id': payment_id, 'error': str(exc)},
+            )
+            return False
+
+        settings_dict = connection.settings_dict
+        conn_kwargs = {
+            'dbname': settings_dict['NAME'],
+            'user': settings_dict['USER'],
+            'password': settings_dict['PASSWORD'] or None,
+            'connect_timeout': 5,
+            # Ограничение времени ожидания блокировок и выполнения
+            # запроса: при конфликте блокировок с несущей транзакцией
+            # падаем быстро и честно, а не висим.
+            'options': '-c lock_timeout=3000 -c statement_timeout=15000',
+        }
+        if settings_dict.get('HOST'):
+            conn_kwargs['host'] = settings_dict['HOST']
+        if settings_dict.get('PORT'):
+            conn_kwargs['port'] = settings_dict['PORT']
+
+        in_atomic_block = (
+            django_transaction.get_connection().in_atomic_block
+        )
+
+        try:
+            with psycopg.connect(**conn_kwargs) as audit_conn:
+                with audit_conn.transaction():
+                    with audit_conn.cursor() as cur:
+                        cur.execute(
+                            'SELECT status, amount, refund_amount, '
+                            'refund_required_amount '
+                            'FROM payments_payment WHERE id = %s',
+                            (payment_id,),
+                        )
+                        row = cur.fetchone()
+
+                    if row is None:
+                        # Платёж не существует — фиксировать нечего.
+                        return False
+
+                    status, amount, refund_amount, refund_required_amount = row
+                    if status != PAYMENT_STATUS_SUCCEEDED:
+                        return False
+
+                    remaining = amount - refund_amount
+                    if remaining <= 0:
+                        # Долга нет — состояние уже консистентно.
+                        return True
+                    if refund_required_amount >= remaining:
+                        # Обязательство уже зафиксировано — идемпотентный
+                        # повторный вызов ничего не дублирует.
+                        return True
+
+                    requirement = amount
+                    now = timezone.now()
+                    note = (
+                        reason
+                        or 'Возврат не выполнен — зафиксировано '
+                           'обязательство повторной попытки.'
+                    )
+                    payload = Jsonb({
+                        'error': error,
+                        'refund_required_amount': str(requirement),
+                    })
+
+                    with audit_conn.cursor() as cur:
+                        # Guard-условия в WHERE делают запись идемпотентной
+                        # и не позволяют затереть результат параллельной
+                        # фиксации/расчёта обязательства.
+                        cur.execute(
+                            'UPDATE payments_payment '
+                            'SET refund_required_amount = %s, updated_at = %s '
+                            'WHERE id = %s '
+                            '  AND status = %s '
+                            '  AND refund_amount = %s '
+                            '  AND refund_required_amount < %s',
+                            (
+                                requirement,
+                                now,
+                                payment_id,
+                                PAYMENT_STATUS_SUCCEEDED,
+                                refund_amount,
+                                remaining,
+                            ),
+                        )
+                        updated = cur.rowcount == 1
+                        if updated:
+                            cur.execute(
+                                'INSERT INTO payments_paymentevent '
+                                '(created_at, updated_at, payment_id, '
+                                ' event_type, old_status, new_status, '
+                                ' payload, external_event_id, '
+                                ' performed_by_id, note) '
+                                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '
+                                '        %s, %s)',
+                                (
+                                    now,
+                                    now,
+                                    payment_id,
+                                    PAYMENT_EVENT_REFUND_FAILED,
+                                    PAYMENT_STATUS_SUCCEEDED,
+                                    PAYMENT_STATUS_SUCCEEDED,
+                                    payload,
+                                    '',
+                                    user_id,
+                                    note,
+                                ),
+                            )
+
+                    if updated:
+                        return True
+
+                    # Потеряли гонку с параллельным изменением строки —
+                    # перепроверяем фактическое состояние.
+                    with audit_conn.cursor() as cur:
+                        cur.execute(
+                            'SELECT status, amount, refund_amount, '
+                            'refund_required_amount '
+                            'FROM payments_payment WHERE id = %s',
+                            (payment_id,),
+                        )
+                        row = cur.fetchone()
+                    if row is None or row[0] != PAYMENT_STATUS_SUCCEEDED:
+                        return False
+                    _, amount, refund_amount, refund_required_amount = row
+                    remaining = amount - refund_amount
+                    if refund_required_amount >= remaining:
+                        # Параллельная фиксация уже покрыла обязательство.
+                        return True
+                    logger.critical(
+                        'record_refund_failure_durable_failed',
+                        extra={
+                            'payment_id': payment_id,
+                            'error': 'refund obligation remains uncovered '
+                                     'after guarded update',
+                        },
+                    )
+                    return False
         except Exception as exc:
             # НЕ молчаливо: durable-запись — последняя линия обороны,
             # её провал обязан оставить критический след в логе.
             logger.critical(
                 'record_refund_failure_durable_failed',
-                extra={'payment_id': payment_id, 'error': str(exc)},
+                extra={
+                    'payment_id': payment_id,
+                    'error': str(exc),
+                    'in_atomic_block': in_atomic_block,
+                },
             )
             return False
 

@@ -15,19 +15,6 @@ class PaymentsConfig(AppConfig):
     verbose_name = 'Платёжная система'
 
     def ready(self):
-        # Предварительно регистрируем отдельный audit alias ДО запуска
-        # Django test database lifecycle. Это сохраняет отдельное
-        # соединение для durable refund records, но не мутирует
-        # ConnectionHandler во время теста.
-        from django.db import connections
-
-        alias = 'payments_audit'
-        if alias not in connections.databases:
-            connections.databases[alias] = {
-                **connections.databases['default'],
-                'TEST': {'MIRROR': 'default'},
-            }
-
         # Импортируем signals для регистрации обработчиков.
         # Без этого @receiver декораторы не сработают.
         import apps.payments.signals  # noqa: F401
