@@ -2,12 +2,30 @@
 # apps/shipping/admin/shipping_admin.py — админка для моделей доставки.
 #
 # Регистрирует ShippingZone, ShippingMethod, Shipment в Django Admin.
+#
+# PROD-004 (F-06) — Admin/domain boundary:
+#   Shipment.status — FSM-состояние отправления. Его меняет только
+#   ShippingService.transition_status(): она валидирует
+#   SHIPMENT_STATUS_TRANSITIONS, держит select_for_update, выставляет
+#   shipped_at / delivered_at и синхронизирует статус заказа
+#   (_sync_order_status → OrderService). Прямая запись статуса через
+#   Admin обошла бы FSM и рассинхронизировала Order.
+#   shipped_at / delivered_at защищаются вместе со статусом: их пишет
+#   тот же переход, это часть того же жизненного цикла, а не настройка.
+#   Трек-номер и примечания — операционные данные и остаются
+#   редактируемыми (для трека есть и сервисный путь
+#   ShippingService.update_tracking()).
+#
 # 📖 https://docs.djangoproject.com/en/stable/ref/contrib/admin/
 # ────────────────────────────────────────────────────────────────────────
 
 from django.contrib import admin
 
+from apps.core.admin_guards import ProtectedFieldsAdminMixin
 from apps.shipping.models import Shipment, ShippingMethod, ShippingZone
+
+# PROD-004 (F-06): бизнес-поля отправления, закрытые для записи через Admin.
+SHIPMENT_ADMIN_PROTECTED_FIELDS = ('status', 'shipped_at', 'delivered_at')
 
 
 @admin.register(ShippingZone)
@@ -39,8 +57,21 @@ class ShippingMethodAdmin(admin.ModelAdmin):
 
 
 @admin.register(Shipment)
-class ShipmentAdmin(admin.ModelAdmin):
-    """Админка для отправлений."""
+class ShipmentAdmin(ProtectedFieldsAdminMixin, admin.ModelAdmin):
+    """Админка для отправлений.
+
+    PROD-004 (F-06): статус и переходные таймстампы — read-only
+    (авторитетный путь — ShippingService.transition_status(), API
+    PATCH /api/v1/shipping/shipments/{id}/status/). Трек-номер,
+    примечания и вес остаются административными полями.
+    """
+
+    # ── PROD-004 (F-06): контракт protected-field guard'а ──
+    protected_fields = SHIPMENT_ADMIN_PROTECTED_FIELDS
+    authoritative_path = (
+        'ShippingService.transition_status() '
+        '(API PATCH /api/v1/shipping/shipments/{id}/status/)'
+    )
 
     list_display = (
         'id', 'internal_tracking', 'tracking_number',
@@ -55,4 +86,8 @@ class ShipmentAdmin(admin.ModelAdmin):
     raw_id_fields = ('order', 'user', 'method')
     list_per_page = 50
     ordering = ('-created_at',)
-    readonly_fields = ('internal_tracking', '_tracking_seq')
+    readonly_fields = (
+        'internal_tracking', '_tracking_seq',
+        # PROD-004 (F-06): жизненный цикл отправления — только чтение.
+        'status', 'shipped_at', 'delivered_at',
+    )

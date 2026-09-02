@@ -11,6 +11,16 @@
 #   • Массовые действия: подтвердить, отменить
 #   • Поиск по номеру заказа и email пользователя
 #
+# PROD-004 (F-03) — Admin/domain boundary:
+#   Order.status — бизнес-состояние (FSM). Единственный авторитетный путь
+#   изменения — OrderService.transition_status() / confirm() / cancel(),
+#   которые держат select_for_update, валидируют ORDER_STATUS_TRANSITIONS
+#   и двигают склад/платежи (_handle_inventory_transition).
+#   Поэтому status в Admin — read-only: второй путь записи обошёл бы
+#   FSM, блокировки и инвентарную координацию. Существующие массовые
+#   действия (confirm_selected / cancel_selected) сохранены — они
+#   вызывают ровно этот сервисный путь, а не пишут поле напрямую.
+#
 # 📖 https://docs.djangoproject.com/en/stable/ref/contrib/admin/
 # 📖 https://docs.djangoproject.com/en/stable/ref/contrib/admin/#inlinemodeladmin-objects
 #
@@ -21,8 +31,12 @@
 
 from django.contrib import admin
 
+from apps.core.admin_guards import ProtectedFieldsAdminMixin
 from apps.orders.models import Order, OrderItem
 from apps.orders.models.order import OrderStatus
+
+# PROD-004 (F-03): бизнес-поля заказа, закрытые для записи через Admin.
+ORDER_ADMIN_PROTECTED_FIELDS = ('status',)
 
 
 # ==============================================================
@@ -82,7 +96,7 @@ class OrderItemInline(admin.TabularInline):
 # ==============================================================
 
 @admin.register(Order)
-class OrderAdmin(admin.ModelAdmin):
+class OrderAdmin(ProtectedFieldsAdminMixin, admin.ModelAdmin):
     """
     Конфигурация Django Admin для модели Order.
 
@@ -105,8 +119,18 @@ class OrderAdmin(admin.ModelAdmin):
       • confirm_selected — подтвердить выбранные
       • cancel_selected — отменить выбранные
 
+    PROD-004 (F-03) — СТАТУС:
+      • status — read-only (бизнес-состояние, FSM)
+      • переходы — только OrderService (действия выше + API)
+
     📖 https://docs.djangoproject.com/en/stable/ref/contrib/admin/#modeladmin-objects
     """
+
+    # ── PROD-004 (F-03): контракт protected-field guard'а ──
+    protected_fields = ORDER_ADMIN_PROTECTED_FIELDS
+    authoritative_path = (
+        'OrderService.confirm() / cancel() / transition_status()'
+    )
 
     # ── Отображение в списке ──
     list_display = (
@@ -133,6 +157,10 @@ class OrderAdmin(admin.ModelAdmin):
 
     # ── Поля только для чтения (immutable order) ──
     readonly_fields = (
+        # PROD-004 (F-03): статус — бизнес-состояние. Меняется только
+        # через OrderService (см. действия ниже); в Admin — только чтение
+        # и фильтрация (list_filter = ('status', ...)).
+        'status',
         'order_number',
         'user',
         'cart',
@@ -214,6 +242,18 @@ class OrderAdmin(admin.ModelAdmin):
     def cancel_selected(self, request, queryset):
         """
         Массовая отмена заказов.
+
+        PROD-004: это единственная Admin-операция, меняющая статус, — и она
+        идёт через OrderService.cancel() (освобождение купона, release
+        склада, возврат платежа), а не через запись поля.
+
+        ⚠️ Багфикс PROD-004: раньше сюда передавалось
+        reason='cancelled_by_admin', которого НЕТ в CANCELLATION_REASONS.
+        OrderService.cancel() валидирует причину и бросал ValidationError,
+        то есть действие молча отменяло 0 заказов (ошибка тонула в
+        except Exception → message_user). Теперь используется валидная
+        доменная причина 'other'; кто отменил — видно из user и из
+        сообщения действия.
         """
         from apps.orders.services.order_service import OrderService
         cancelled = 0
@@ -223,7 +263,7 @@ class OrderAdmin(admin.ModelAdmin):
             try:
                 OrderService.cancel(
                     order,
-                    reason='cancelled_by_admin',
+                    reason='other',
                     user=request.user,
                 )
                 cancelled += 1
