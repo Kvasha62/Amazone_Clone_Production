@@ -1,6 +1,58 @@
-# Production Baseline — PROD-009
+# Production Baseline — PROD-011
 
 ## Approved baseline commit
+
+| Field | Value |
+|---|---|
+| Repository | `Kvasha62/Amazone_Clone_Production` |
+| Branch | `main` |
+| Approved baseline SHA | `406a96c37b0d0249ea7f44b459a54dca8566561b` |
+| Baseline commit title | `Merge pull request #20 from Kvasha62/arena/01a0620b-amazone-clone-production` |
+| CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run #38 / ID `33633045879`, job/check `ci` (ID `100256993637`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; Django system checks, migration check, migrations, and tests all succeeded; run completed 2026-09-02 |
+| Approved on | 2026-09-02 |
+| Ticket | PROD-011 |
+
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`406a96c37b0d0249ea7f44b459a54dca8566561b` is the authoritative production
+state. It is the merge commit for completed PROD-010 (PR #20). Earlier baseline
+records are preserved below as history.
+
+## Verification performed (read-only)
+
+1. GitHub `main`, local `main`, and `origin/main` all resolve to `406a96c37b0d0249ea7f44b459a54dca8566561b` — an exact match with the current production baseline SHA (verified 2026-09-02).
+2. GitHub Actions workflow `CI`, run #38 / ID `33633045879`: `head_sha` = `406a96c37b0d0249ea7f44b459a54dca8566561b` (exact match), status `completed`, conclusion `success`; job `ci` (ID `100256993637`) is `completed` / `success`.
+3. Every substantive CI job step succeeded, including Django system checks, migration check, migration application, and the full test suite.
+4. PROD-010 / PR #20 is `MERGED` / completed; its merge commit is exactly `406a96c37b0d0249ea7f44b459a54dca8566561b`.
+5. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+6. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-011 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-011 — Advance production baseline after PROD-010 (Issue #21) |
+| Status | Documentation-only governance change; pending Architect review and Owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `27fc2c3b2aca17db8656e4381464ff52022fab70` → `406a96c37b0d0249ea7f44b459a54dca8566561b` (`main`) |
+| Completed production change | PROD-010 / PR #20 — merged 2026-09-02 |
+| Verified on | 2026-09-02 |
+
+PROD-010 is recorded as completed/merged via PR #20. Its PostgreSQL-sequence
+order-number allocation and concurrency fix (F-13) are part of the verified
+`main` state. No functional, model, schema, migration, dependency, CI workflow,
+deployment, or educational-repository changes are introduced by PROD-011. F-14
+and all other remaining audit findings are outside this ticket and remain
+unchanged. Architect review is required before the Owner performs the final
+merge; the Architect/Assistant must not merge this governance pull request.
+
+## Historical baseline record — PROD-009 (superseded)
+
+This record was current immediately before PROD-011. It is preserved for audit
+and is now superseded by the approved baseline at the top of this document.
 
 | Field | Value |
 |---|---|
@@ -13,21 +65,6 @@
 | Verified CI evidence on baseline SHA | Workflow `CI`; all setup, checks, migration, and test steps successful; run completed 2026-09-02 |
 | Approved on | 2026-09-02 |
 | Ticket | PROD-009 |
-
-Production `main` points exactly at this SHA. This commit is the current
-production source-of-truth commit and the frozen reference point for every
-subsequent production change. `main` at
-`27fc2c3b2aca17db8656e4381464ff52022fab70` is the authoritative production
-state. It is the merge commit for PROD-008 (PR #16), following PROD-007 (PR
-#13). Earlier baseline records are preserved below as history.
-
-## Verification performed (read-only)
-
-1. `git rev-parse main` → `27fc2c3b2aca17db8656e4381464ff52022fab70` — matches the current production baseline SHA (verified 2026-09-02).
-2. GitHub Actions workflow `CI`, run ID `33621123578`: `head_sha` = `27fc2c3b2aca17db8656e4381464ff52022fab70` (exact match), status `completed`, conclusion `success`; job `ci` (ID `100218124214`) is `completed` / `success`.
-3. PR #13 (PROD-007) and PR #16 (PROD-008) are merged; PR #16 merge commit is the current baseline SHA.
-4. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
-5. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
 
 ## Baseline advance — PROD-009 (this document)
 
