@@ -476,6 +476,14 @@ existing orders.
 - `SUCCEEDED → REFUNDED` (full or partial)
 - `create_payment()`: validates `amount == order.total`
 - `handle_webhook()`: idempotent webhook processing
+- `Payment.external_id` is **globally unique** among non-blank values
+  (partial `UniqueConstraint` `payment_external_id_unique`, F-15):
+  webhook correlation looks up by `external_id` alone (ADR-004), so a
+  duplicate would make the lookup ambiguous — including across
+  different providers. Blank (`''` = no provider ID assigned yet) is
+  exempt, so multiple payment attempts per order stay supported. The
+  constraint replaces the plain `db_index` on the same column (a
+  non-blank lookup satisfies the partial-index predicate).
 
 **PROD-003 — fail-safe подтверждение и возвраты (order ↔ inventory ↔ payment):**
 
@@ -618,6 +626,7 @@ Stock ──1:N── StockMovement (audit)
 | `inventory_stock`  | `stock_reserved_lte_quantity`               | Reserved cannot exceed quantity|
 | `inventory_stock`  | `stock_quantity_non_negative`               | Quantity ≥ 0                   |
 | `payments_payment` | `payment_refund_lte_amount`                 | Refund cannot exceed payment   |
+| `payments_payment` | `payment_external_id_unique`                | Provider payment ID is globally unique (blank = unassigned) |
 
 > Uniqueness invariants use `UniqueConstraint` (or a field-level
 > `unique=True`, as for `orders_order.order_number`); range/validity

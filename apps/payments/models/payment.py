@@ -220,12 +220,26 @@ class Payment(BaseModel):
     #   • Реконсиляции (сверка с платёжной системой)
     #   • Повторных запросов (status check)
     #   • Вебхуков (webhook передаёт этот ID)
+    #
+    # F-15 / PROD-014 — инвариант уникальности:
+    #   Непустой external_id ГЛОБАЛЬНО уникален — это авторитетный
+    #   контракт кода, а не redesign: вебхук-корреляция (ADR-004) ищет
+    #   платёж только по external_id (QuerySet.with_external_id, без
+    #   provider), сериал вебхука вообще не передаёт provider. Дубль
+    #   идентификатора сделал бы выборку .first() неоднозначной.
+    #   Инвариант защищён частичным уникальным индексом на уровне БД
+    #   (UniqueConstraint payment_external_id_unique, условие
+    #   external_id != ''): платёж без назначенного провайдером ID
+    #   (blank, default='') может существовать во многих экземплярах —
+    #   несколько попыток оплаты на один заказ сохранены.
+    #   Замена обычного db_index на частичный уникальный индекс не
+    #   ухудшает продакшн-путь: корреляция всегда ищет конкретный
+    #   непустой ID, который удовлетворяет предикату индекса.
     external_id = models.CharField(
         verbose_name='Внешний ID',
         max_length=MAX_EXTERNAL_ID_LENGTH,
         blank=True,
         default='',
-        db_index=True,
     )
 
     # provider — платёжный провайдер.
@@ -341,6 +355,17 @@ class Payment(BaseModel):
                     refund_required_amount__lte=models.F('amount'),
                 ),
                 name='payment_refund_required_lte_amount',
+            ),
+            # F-15 / PROD-014: непустой external_id глобально уникален
+            # (контракт вебхук-корреляции ADR-004 — поиск только по
+            # external_id, provider в выборке не участвует). Условие
+            # исключает blank-значения (default=''): платежи без
+            # назначенного провайдером ID не конкурируют между собой,
+            # несколько попыток оплаты на заказ сохранены.
+            models.UniqueConstraint(
+                fields=['external_id'],
+                condition=~models.Q(external_id=''),
+                name='payment_external_id_unique',
             ),
         ]
 

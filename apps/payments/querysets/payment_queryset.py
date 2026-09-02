@@ -88,7 +88,14 @@ class PaymentQuerySet(models.QuerySet):
         return self.filter(provider=provider)
 
     def with_external_id(self, external_id: str):
-        """Платёж по внешнему ID (от провайдера)."""
+        """
+        Платёж по внешнему ID (от провайдера).
+
+        Авторитетный путь вебхук-корреляции (ADR-004): ищет ТОЛЬКО по
+        external_id, без provider — непустой external_id глобально
+        уникален (UniqueConstraint payment_external_id_unique, F-15),
+        поэтому выборка всегда содержит не более одной строки.
+        """
         return self.filter(external_id=external_id)
 
     # ──────────────────────────────────────────────────────────────
