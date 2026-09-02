@@ -10,9 +10,15 @@ from pathlib import Path
 # ────────────────────────────────────────────────────────────────────────
 # .env — переменные окружения (django-cors-headers, python-dotenv)
 #
-# ЧТО БУДЕТ, ЕСЛИ НЕТ .env:
-#   os.getenv() вернёт значение по умолчанию (второй аргумент).
-#   Проект работает «из коробки» с дефолтами.
+# ПРОДАКШЕН-КОНТРАКТ (PROD-007 / F-11):
+#   • DJANGO_DEBUG обязателен и явный. "true" → development, "false" →
+#     production. Без значения или с невалидным — запуск падает
+#     (ImproperlyConfigured), а не молча выбирает dev-конфигурацию.
+#   • В production ОБЯЗАТЕЛЬНЫ: DJANGO_SECRET_KEY (не django-insecure-*),
+#     DJANGO_ALLOWED_HOSTS (явный список, без "*"), и CORS не может быть
+#     разрешающим (CORS_ALLOW_ALL_ORIGINS принудительно False).
+#   • Development-дефолты (localhost CORS, "*" hosts) НИКОГДА не применяются
+#     на production-пути.
 # ────────────────────────────────────────────────────────────────────────
 
 from dotenv import load_dotenv
@@ -26,16 +32,188 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
+# ────────────────────────────────────────────────────────────────────────
+# PROD-007 / F-11 — Production configuration contract (fail closed)
+#
+# The project boots in exactly one of two explicit modes:
+#
+#   • PRODUCTION  — DJANGO_DEBUG is explicitly "false"/"0"/"no"/"off"
+#   • DEVELOPMENT — DJANGO_DEBUG is explicitly "true"/"1"/"yes"/"on"
+#
+# Production is the SAFE, EXPLICIT mode. DJANGO_DEBUG must be provided
+# explicitly — there is no implicit default and no silent fallback to a
+# development/unsafe configuration. A missing or invalid value fails fast
+# with ImproperlyConfigured instead of guessing.
+#
+# On the production path the following security-sensitive settings CANNOT
+# fall back to unsafe values:
+#   - SECRET_KEY       required, and must not be a Django "django-insecure-*"
+#                      placeholder;
+#   - ALLOWED_HOSTS    an explicit, non-empty list that must not contain "*";
+#   - CORS             CORS_ALLOW_ALL_ORIGINS is forced to False (never
+#                      silently permissive).
+#
+# Development keeps convenient, explicit defaults (localhost CORS, "*" hosts)
+# but those defaults are NEVER applied on the production path.
+# ────────────────────────────────────────────────────────────────────────
+
+from django.core.exceptions import ImproperlyConfigured
+
+_UNSET = object()
+
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on", "y"})
+_FALSE_TOKENS = frozenset({"0", "false", "no", "off", "n"})
+
+
+def _parse_bool(name, raw, *, default=_UNSET):
+    """Deterministic boolean parsing (AC-5).
+
+    Accepts only the explicit token sets above. Never infers truthiness from a
+    value's mere presence (no ``bool(os.getenv(...))``). Raises
+    ``ImproperlyConfigured`` on a missing required value or an invalid token.
+    """
+    if raw is None:
+        if default is _UNSET:
+            raise ImproperlyConfigured(
+                f"{name} is required but was not provided. "
+                f"Set it explicitly to one of "
+                f"{sorted(_TRUE_TOKENS | _FALSE_TOKENS)}."
+            )
+        return default
+    token = str(raw).strip().lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    raise ImproperlyConfigured(
+        f"Invalid boolean value for {name}={raw!r}. "
+        f"Expected one of {sorted(_TRUE_TOKENS | _FALSE_TOKENS)}."
+    )
+
+
+def _parse_host_list(name, raw, *, default=_UNSET, allow_wildcard=True):
+    """Deterministic comma-separated list parsing (AC-5).
+
+    Raises on a missing required value, an empty value, or (in production) a
+    wildcard "*" entry.
+    """
+    if raw is None:
+        if default is _UNSET:
+            raise ImproperlyConfigured(
+                f"{name} is required but was not provided."
+            )
+        return list(default)
+    items = [item.strip() for item in str(raw).split(",")]
+    items = [item for item in items if item]
+    if not items:
+        raise ImproperlyConfigured(
+            f"{name} must contain at least one non-empty host."
+        )
+    if not allow_wildcard and "*" in items:
+        raise ImproperlyConfigured(
+            f"{name} may not contain the wildcard '*' in production."
+        )
+    return items
+
+
+def _build_config(environ):
+    """Build security-relevant configuration from ``environ``.
+
+    ``environ`` must support ``.get(name, default)`` like ``os.environ``.
+    Raises ``ImproperlyConfigured`` whenever production configuration is
+    missing or unsafe. This is the single source of truth for the config
+    contract and is exercised directly by the configuration tests.
+    """
+    debug = _parse_bool("DJANGO_DEBUG", environ.get("DJANGO_DEBUG"))
+
+    # ── SECRET_KEY (AC-1) ──
+    if debug:
+        # Development convenience: explicit value preferred, safe fallback
+        # only when none is given. Never used on the production path.
+        secret_key = environ.get("DJANGO_SECRET_KEY") or (
+            "django-insecure-DEV-ONLY-not-for-production-"
+            "please-change-me-do-not-use-in-any-real-deployment"
+        )
+    else:
+        secret_key = environ.get("DJANGO_SECRET_KEY")
+        if not secret_key:
+            raise ImproperlyConfigured(
+                "DJANGO_SECRET_KEY is required in production. Generate one with: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(50))\""
+            )
+        if secret_key.startswith("django-insecure-"):
+            raise ImproperlyConfigured(
+                "DJANGO_SECRET_KEY must not be a Django-generated "
+                "'django-insecure-*' placeholder in production."
+            )
+
+    # ── ALLOWED_HOSTS (AC-3) ──
+    if debug:
+        allowed_hosts = _parse_host_list(
+            "DJANGO_ALLOWED_HOSTS",
+            environ.get("DJANGO_ALLOWED_HOSTS"),
+            default=["*"],
+        )
+    else:
+        allowed_hosts = _parse_host_list(
+            "DJANGO_ALLOWED_HOSTS",
+            environ.get("DJANGO_ALLOWED_HOSTS"),
+            allow_wildcard=False,
+        )
+
+    # ── CORS (AC-4) ──
+    if debug:
+        cors_allow_all = _parse_bool(
+            "CORS_ALLOW_ALL_ORIGINS",
+            environ.get("CORS_ALLOW_ALL_ORIGINS"),
+            default=True,
+        )
+        cors_allowed_origins = _parse_host_list(
+            "CORS_ALLOWED_ORIGINS",
+            environ.get("CORS_ALLOWED_ORIGINS"),
+            default=[
+                "http://localhost:3000",
+                "http://localhost:5173",
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:5173",
+            ],
+        )
+    else:
+        # Production must never be silently permissive.
+        cors_allow_all = _parse_bool(
+            "CORS_ALLOW_ALL_ORIGINS",
+            environ.get("CORS_ALLOW_ALL_ORIGINS"),
+            default=False,
+        )
+        if cors_allow_all:
+            raise ImproperlyConfigured(
+                "CORS_ALLOW_ALL_ORIGINS must not be enabled in production."
+            )
+        cors_allowed_origins = _parse_host_list(
+            "CORS_ALLOWED_ORIGINS",
+            environ.get("CORS_ALLOWED_ORIGINS"),
+            default=[],
+        )
+
+    return {
+        "DEBUG": debug,
+        "SECRET_KEY": secret_key,
+        "ALLOWED_HOSTS": allowed_hosts,
+        "CORS_ALLOW_ALL_ORIGINS": cors_allow_all,
+        "CORS_ALLOWED_ORIGINS": cors_allowed_origins,
+    }
+
+
+# Apply the configuration contract at import time.
+_CONFIG = _build_config(os.environ)
+
 # SECURITY WARNING: keep the secret key used for production secret!
-SECRET_KEY = os.getenv(
-    "DJANGO_SECRET_KEY",
-    "django-insecure-0o6-#o=vdk-tmhlq9^m=-ygr4y9lcscmft!fs(+#eno+&i-(n=",
-)
+SECRET_KEY = _CONFIG["SECRET_KEY"]
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
+DEBUG = _CONFIG["DEBUG"]
 
-ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
+ALLOWED_HOSTS = _CONFIG["ALLOWED_HOSTS"]
 
 # Application definition
 
@@ -207,20 +385,12 @@ MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 #
 # 📖 https://github.com/adamchainz/django-cors-headers
 
-# CORS_ALLOW_ALL_ORIGINS — для dev (True).
-# В production — обязательно False + CORS_ALLOWED_ORIGINS!
-CORS_ALLOW_ALL_ORIGINS = os.getenv(
-    "CORS_ALLOW_ALL_ORIGINS", "True" if DEBUG else "False",
-).lower() in ("true", "1", "yes")
-
-CORS_ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "CORS_ALLOWED_ORIGINS",
-        "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173",
-    ).split(",")
-    if origin.strip()
-]
+# CORS configuration is derived from the production config contract defined
+# above (see _build_config). In production CORS_ALLOW_ALL_ORIGINS is forced to
+# False and may never be permissive; in development it defaults to True with
+# explicit localhost origins.
+CORS_ALLOW_ALL_ORIGINS = _CONFIG["CORS_ALLOW_ALL_ORIGINS"]
+CORS_ALLOWED_ORIGINS = _CONFIG["CORS_ALLOWED_ORIGINS"]
 
 # Разрешаем React отправлять JWT в заголовке Authorization
 CORS_ALLOW_HEADERS = [
@@ -339,7 +509,7 @@ AUTHENTICATION_BACKENDS = [
 # Оба способа нужны потому что settings.py загружается ДО test_runner.py,
 # поэтому DJANGO_TESTING может быть ещё не установлен.
 _is_testing = (
-    os.getenv("DJANGO_TESTING", "False").lower() in ("true", "1", "yes")
+    _parse_bool("DJANGO_TESTING", os.getenv("DJANGO_TESTING"), default=False)
     or "test" in sys.argv
 )
 
