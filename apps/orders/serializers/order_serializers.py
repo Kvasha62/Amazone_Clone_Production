@@ -27,6 +27,8 @@
 #   • Все API endpoints заказов → ImportError (500)
 # ────────────────────────────────────────────────────────────────────────
 
+from collections.abc import Mapping
+
 from rest_framework import serializers
 
 from apps.orders.models import Order, OrderItem
@@ -36,6 +38,29 @@ from apps.orders.models.order import OrderStatus
 # ==============================================================
 # INPUT-СЕРИАЛИЗАТОРЫ (валидация запросов)
 # ==============================================================
+
+def _mapping_payloads(initial_data):
+    """Возвращает mapping-payload'ы из ``Serializer.initial_data``.
+
+    ФОРМА ``request.data`` ЗАВИСИТ ОТ ПАРСЕРА DRF:
+      • JSONRenderer/JSONParser                → обычный ``dict``
+      • FormParser (application/x-www-form-urlencoded) → ``QueryDict``
+      • MultiPartParser (multipart/form-data)  → ``QueryDict``
+
+    Поэтому проверка идёт по ``collections.abc.Mapping``, а не по
+    конкретному ``dict``: так она одинаково работает для JSON dict,
+    Django ``QueryDict`` и любого другого mapping-like объекта, который
+    может отдать парсер.
+
+    Немappping-вход (строка, число, список) возвращает пустой кортеж —
+    ложных срабатываний нет; такой вход DRF отклоняет ещё до ``validate()``
+    в ``to_internal_value()`` («Invalid data. Expected a dictionary…»),
+    поэтому до расчёта заказа он не доходит в любом случае.
+    """
+    if isinstance(initial_data, Mapping):
+        return (initial_data,)
+    return ()
+
 
 class CreateOrderInputSerializer(serializers.Serializer):
     """
@@ -78,15 +103,19 @@ class CreateOrderInputSerializer(serializers.Serializer):
         неизвестные поля; здесь неизвестное денежное поле отклоняется явно,
         чтобы подделка цены доставки была видна клиенту как ошибка,
         а не как «принятый» запрос.
+
+        Контракт должен работать для ЛЮБОГО поддерживаемого формата тела:
+        JSON (``dict``), form-encoded и multipart (``QueryDict``) —
+        см. ``_mapping_payloads()``.
         """
-        initial = self.initial_data
-        if isinstance(initial, dict) and 'delivery_cost' in initial:
-            raise serializers.ValidationError({
-                'delivery_cost': (
-                    'Стоимость доставки рассчитывается на сервере и не '
-                    'принимается от клиента. Удалите поле delivery_cost.'
-                ),
-            })
+        for payload in _mapping_payloads(self.initial_data):
+            if 'delivery_cost' in payload:
+                raise serializers.ValidationError({
+                    'delivery_cost': (
+                        'Стоимость доставки рассчитывается на сервере и не '
+                        'принимается от клиента. Удалите поле delivery_cost.'
+                    ),
+                })
         return attrs
 
 

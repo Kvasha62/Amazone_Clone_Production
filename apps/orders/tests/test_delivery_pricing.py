@@ -16,7 +16,9 @@
 # ────────────────────────────────────────────────────────────────────────
 
 from decimal import Decimal
+from urllib.parse import urlencode
 
+from django.http import QueryDict
 from django.test import TestCase
 from django.urls import reverse
 
@@ -279,6 +281,33 @@ class CreateOrderInputSerializerTests(TestCase):
         self.assertFalse(serializer.is_valid())
         self.assertIn('delivery_cost', serializer.errors)
 
+    def test_explicit_delivery_cost_in_querydict_is_rejected(self):
+        """QueryDict — то, что отдают FormParser и MultiPartParser."""
+        serializer = CreateOrderInputSerializer(
+            data=QueryDict('delivery_cost=0.00'),
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('delivery_cost', serializer.errors)
+
+    def test_querydict_with_notes_only_is_valid(self):
+        """Контроль: сам QueryDict-вход валиден, отклоняется только поле."""
+        serializer = CreateOrderInputSerializer(
+            data=QueryDict('notes=Позвонить+перед+доставкой'),
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(
+            serializer.validated_data['notes'],
+            'Позвонить перед доставкой',
+        )
+
+    def test_non_mapping_payload_never_reaches_order_creation(self):
+        """Не-mapping тело отклоняется самим DRF ещё до validate()."""
+        serializer = CreateOrderInputSerializer(
+            data=[{'delivery_cost': '0.00'}],
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('non_field_errors', serializer.errors)
+
 
 # ================================================================
 # 3. API: подделка цены доставки через запрос
@@ -367,14 +396,72 @@ class CheckoutDeliveryCostAPITests(DeliveryPricingTestCase):
         self.assertEqual(response.status_code, 400, response.data)
         self.assertFalse(Order.objects.filter(user=self.user).exists())
 
-    def test_forged_delivery_cost_in_form_encoding_is_rejected(self):
-        """Контракт действует и для form-encoded тела запроса."""
+    def test_forged_delivery_cost_in_multipart_is_rejected(self):
+        """multipart/form-data (дефолт DRF APIClient) → 400."""
         self._make_cart()
 
         response = self.client.post(self.url, {'delivery_cost': '1.00'})
 
         self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('delivery_cost', response.data)
         self.assertFalse(Order.objects.filter(user=self.user).exists())
+
+    # ── application/x-www-form-urlencoded (FormParser → QueryDict) ──
+
+    def _post_urlencoded(self, payload: dict):
+        """Настоящий form-encoded запрос: urlencoded-тело + content-type.
+
+        Именно этот путь разбирает FormParser, отдавая view ``QueryDict``,
+        а не ``multipart/form-data``, который DRF подставляет по умолчанию.
+        """
+        return self.client.post(
+            self.url,
+            data=urlencode(payload),
+            content_type='application/x-www-form-urlencoded',
+        )
+
+    def test_forged_zero_delivery_cost_in_urlencoded_form_is_rejected(self):
+        """form-encoded delivery_cost=0.00 → 400, заказ не создаётся."""
+        self._make_cart()
+
+        response = self._post_urlencoded({'delivery_cost': '0.00'})
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertIn('delivery_cost', response.data)
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+
+    def test_forged_lower_delivery_cost_in_urlencoded_form_is_rejected(self):
+        """form-encoded delivery_cost=1.00 → 400, заказ не создаётся."""
+        self._make_cart()
+
+        response = self._post_urlencoded({'delivery_cost': '1.00'})
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+
+    def test_forged_higher_delivery_cost_in_urlencoded_form_is_rejected(self):
+        """form-encoded delivery_cost=99999.00 → 400, заказ не создаётся."""
+        self._make_cart()
+
+        response = self._post_urlencoded({'delivery_cost': '99999.00'})
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+
+    def test_urlencoded_form_without_delivery_cost_creates_order(self):
+        """Контроль: form-encoded путь рабочий — 400 даёт именно проверка.
+
+        Без этого теста нельзя отличить «поле отклонено» от «запрос
+        вообще не дошёл до валидации».
+        """
+        self._make_cart()
+
+        response = self._post_urlencoded({'notes': 'К двери'})
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['delivery_cost'], '300.00')
+        self.assertEqual(response.data['total'], '2800.00')
+        self.assertFalse(Order.objects.exclude(user=self.user).exists())
 
 
 # ================================================================
