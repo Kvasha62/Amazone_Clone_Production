@@ -1,4 +1,4 @@
-# Production Baseline — PROD-005
+# Production Baseline — PROD-009
 
 ## Approved baseline commit
 
@@ -6,31 +6,44 @@
 |---|---|
 | Repository | `Kvasha62/Amazone_Clone_Production` |
 | Branch | `main` |
-| Approved baseline SHA | `78981863e20e4be705480157402156b455e77211` |
-| Baseline commit title | `Merge pull request #7 from Kvasha62/arena/01a060a9-amazone-clone-production` |
+| Approved baseline SHA | `27fc2c3b2aca17db8656e4381464ff52022fab70` |
+| Baseline commit title | `Merge pull request #16 from Kvasha62/arena/01a06191-amazone-clone-production` |
 | CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
-| CI status on baseline SHA | ✅ green — GitHub Actions run #19 / ID `33600313709`, check run `ci` — `completed` / `success` |
-| Verified test evidence on baseline SHA | 1262 tests passed; `python manage.py makemigrations --check` clean (CI environment: PostgreSQL 18.6, Python 3.13.15, Django 6.1) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run ID `33621123578`, job/check `ci` (ID `100218124214`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; all setup, checks, migration, and test steps successful; run completed 2026-09-02 |
 | Approved on | 2026-09-02 |
-| Ticket | PROD-005 |
+| Ticket | PROD-009 |
 
-Production `main` points exactly at this SHA. This commit is the frozen
-reference point for every subsequent production change: releases, hotfixes and
-audits are described relative to it. `main` at
-`78981863e20e4be705480157402156b455e77211` is the authoritative production
-state and the single production source of truth. This baseline supersedes the
-PROD-000 baseline `38648bddb82c8cd4848e03e930a46e499e4e017e` and the PROD-003
-code baseline `df74d6a945fe813ad02a7818409173ef2df6b742`; both records are
-preserved below as history.
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`27fc2c3b2aca17db8656e4381464ff52022fab70` is the authoritative production
+state. It is the merge commit for PROD-008 (PR #16), following PROD-007 (PR
+#13). Earlier baseline records are preserved below as history.
 
 ## Verification performed (read-only)
 
-1. `git rev-parse origin/main` → `78981863e20e4be705480157402156b455e77211` — matches the approved baseline SHA (verified 2026-09-02).
-2. GitHub Actions run #19 / ID `33600313709`: `head_sha` = `78981863e20e4be705480157402156b455e77211` (exact match), status `completed`, conclusion `success`, job `ci` `success`.
-3. Verified test evidence on that run (PROD-004 merge CI): 1262 tests passed and `python manage.py makemigrations --check` clean; environment PostgreSQL 18.6, Python 3.13.15, Django 6.1; verification date 2026-09-02.
-4. PR #5 (PROD-003) is MERGED — merge commit `e27b1e1cc5ab319f7f684a5bc13ceafe7bc9916b`, 2026-09-02; PR #7 (PROD-004) is MERGED — merge commit `78981863e20e4be705480157402156b455e77211`, 2026-09-02.
-5. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
-6. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+1. `git rev-parse main` → `27fc2c3b2aca17db8656e4381464ff52022fab70` — matches the current production baseline SHA (verified 2026-09-02).
+2. GitHub Actions workflow `CI`, run ID `33621123578`: `head_sha` = `27fc2c3b2aca17db8656e4381464ff52022fab70` (exact match), status `completed`, conclusion `success`; job `ci` (ID `100218124214`) is `completed` / `success`.
+3. PR #13 (PROD-007) and PR #16 (PROD-008) are merged; PR #16 merge commit is the current baseline SHA.
+4. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+5. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-009 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-009 — Advance production baseline after PROD-007 and PROD-008 (Issue #17) |
+| Status | Documentation-only governance change; pending review and owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `78981863e20e4be705480157402156b455e77211` → `27fc2c3b2aca17db8656e4381464ff52022fab70` (`main`) |
+| Verified on | 2026-09-02 |
+
+PROD-007 is recorded as completed/merged via PR #13. Its production settings
+hardening is part of the verified `main` state. PROD-008 is recorded as
+completed/merged via PR #16. Its production deployment configuration is part
+of the verified `main` state. No functional, schema, dependency, CI workflow,
+or deployment implementation changes are introduced by PROD-009.
 
 ## Baseline scope
 
