@@ -364,6 +364,10 @@ existing orders.
 ### `core` — Foundation
 
 - `BaseModel`: abstract base with `created_at`, `updated_at`
+- `apps/core/admin_guards.py`: shared Django Admin ↔ domain boundary
+  guards (PROD-004, see § Cross-Domain Coordination). Dependency-free, so
+  any app's `admin/` module may use it without inverting the dependency
+  direction.
 - Health-check endpoint: `GET /api/v1/health/`
 
 ### `users` — Authentication & Profile
@@ -966,6 +970,58 @@ Raw ORM / shell mutations of `is_active` and of the bounds remain an
 accepted trade-off of the one-way architecture; raw ORM writes leave
 `min_price`/`max_price` stale until the next pricing operation.
 
+### Admin ↔ Domain Boundary (PROD-004)
+
+**Rule.** Django Admin is an administrative interface, not an
+alternative domain API. Business state transitions and business-owned
+counters/quantities are mutated **only** through the authoritative
+domain/application service path. Admin must not offer a second mutation
+path that bypasses invariants, events, coordination, validation or
+concurrency controls.
+
+Implemented as a shared guard (`apps/core/admin_guards.py`, importable by
+every app because `core` has no domain dependencies):
+
+- `ProtectedFieldsAdminMixin` / `ProtectedFieldsInlineMixin` declare
+  `protected_fields` (plus `authoritative_path` used in error messages).
+- **Layer 1 (UI/form).** `get_readonly_fields()` always appends the
+  protected fields, so the generated ModelForm/inline form has no inputs
+  for them and an ordinary Admin POST cannot bind them.
+- **Layer 2 (server-side).** `save_model()` compares the in-memory object
+  with the stored row and raises `PermissionDenied` on any protected
+  difference; a change-save writes an explicit `update_fields` set that
+  excludes the protected columns, so they are absent from the Admin
+  `UPDATE` even under a concurrent service write. On the add path a
+  protected value must equal its model default, otherwise the create is
+  refused. `CartAdmin.save_formset()` applies the same check to
+  `CartItemInline` through `guard_inline_formsets()` before the formset is
+  saved.
+
+| Admin surface | Protected (read-only) | Authoritative path | Still editable in Admin |
+|---------------|-----------------------|--------------------|-------------------------|
+| `OrderAdmin` | `Order.status` | `OrderService.confirm()` / `cancel()` / `transition_status()` (also exposed as the existing `confirm_selected` / `cancel_selected` actions) | `notes`, `cancellation_reason`; status stays visible and filterable |
+| `StockAdmin` | `Stock.variant`, `quantity`, `reserved_quantity` | `InventoryService.restock()` / `adjust_stock()` / `reserve_stock()` / `release_stock()` / `commit_stock()`; rows created by `get_or_create_stock()` | `low_stock_threshold` (operational config); `StockMovementInline` stays a read-only audit view and offers no add form |
+| `PriceAdmin` | `Price.variant`, `price`, `sale_price`, `currency` | `PricingService.set_price()` / `remove_price()` (API `POST /api/v1/pricing/variants/{id}/price/`, `POST /api/v1/pricing/prices/bulk/`) | inspection only; Admin add is not offered because a price row cannot exist without a price value |
+| `ShipmentAdmin` | `Shipment.status`, `shipped_at`, `delivered_at` | `ShippingService.transition_status()` (API `PATCH /api/v1/shipping/shipments/{id}/status/`), `ShippingService.create_shipment()` | `tracking_number` (also `ShippingService.update_tracking()`), `notes`, `weight_kg` |
+| `CouponAdmin` | `Coupon.times_used` | `DiscountService.register_usage()` / `release_usage()` | code, discount type/value, limits, period, `is_active` |
+| `CartItemAdmin`, `CartItemInline` | `CartItem.variant`, `quantity` | `CartService.add_item()` / `update_item_quantity()` / `remove_item()` | inspection only on both surfaces; inline offers no add form |
+
+`Shipment.shipped_at` / `delivered_at` are protected together with the
+status because they are written exclusively by the same transition; they
+are lifecycle data, not configuration. `Stock.variant` and `Price.variant`
+are protected as row identity: re-pointing a row would move stock or price
+bounds between SKUs/products with no `StockMovement` row, no
+`PriceHistory` entry and no lock — the same class of bypass as writing the
+counter directly.
+
+Where no service-level operation exists in the Admin context (creating a
+`Stock`, `Price` or `CartItem` row) Admin refuses the mutation instead of
+inventing a parallel business API. Row deletion on these surfaces is not
+covered by this boundary and remains a separate concern.
+
+Raw ORM / shell writes remain outside this guard by design; it hardens the
+Admin surface only.
+
 ### Role of Django Signals
 
 Django signals are allowed for local/same-domain housekeeping
@@ -1171,11 +1227,25 @@ src/api/
   through ReviewService). ProductAdmin aggregate guards are covered by
   Admin configuration/form tests and forced-save tests so removing either
   layer fails the suite.
+- Admin ↔ domain boundary tests (PROD-004, see § Cross-Domain
+  Coordination): `apps/orders/tests/test_admin_guards.py`,
+  `apps/inventory/tests/test_admin_guards.py`,
+  `apps/pricing/tests/test_admin_guards.py`,
+  `apps/shipping/tests/test_admin_guards.py`,
+  `apps/discounts/tests/test_admin_guards.py` and
+  `apps/cart/tests/test_admin_guards.py`. Each file asserts behaviour, not
+  just configuration: form/UI metadata has no input for the protected
+  field, a crafted Admin POST cannot move the business state, a forced
+  `save_model()` / inline formset save is rejected and the protected
+  columns are absent from the emitted `UPDATE`, the legitimate
+  administrative edit still saves, and the authoritative service path
+  still works.
 
 > Test count as of last measurement: ~950 tests, 0 failures, 2 skipped
 > (PostgreSQL-only). A full PostgreSQL run after Issue #19 measured
-> 1048 tests, 0 failures. This number will change as tests are added or
-> refactored.
+> 1048 tests, 0 failures. A full PostgreSQL run after PROD-004 (Issue #6)
+> measured 1262 tests, 0 failures. This number will change as tests are
+> added or refactored.
 
 ### Per-App Test Structure
 

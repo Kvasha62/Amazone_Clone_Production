@@ -1,16 +1,38 @@
 # ────────────────────────────────────────────────────────────────────────
 # apps/inventory/admin/stock_admin.py — Django Admin для склада.
 #
+# PROD-004 (F-04) — Admin/domain boundary:
+#   Stock.quantity / reserved_quantity — бизнес-счётчики склада. Их
+#   единственный владелец — InventoryService (restock / adjust_stock /
+#   reserve_stock / release_stock / commit_stock): каждый путь держит
+#   select_for_update, проверяет CheckConstraint-инварианты и пишет
+#   аудит-строку StockMovement. Stock.variant — идентичность строки:
+#   перенос остатка на другой SKU меняет складское состояние того же
+#   класса, что и правка quantity (без StockMovement и без блокировки).
+#   Поэтому все три поля в Admin read-only, а строки Stock создаёт
+#   InventoryService.get_or_create_stock().
+#   Остаётся редактируемым low_stock_threshold — операционная настройка
+#   уведомлений, не бизнес-состояние.
+#
 # 📖 https://docs.djangoproject.com/en/stable/ref/contrib/admin/
 # ────────────────────────────────────────────────────────────────────────
 
 from django.contrib import admin
 
+from apps.core.admin_guards import ProtectedFieldsAdminMixin
 from apps.inventory.models import Stock, StockMovement
+
+# PROD-004 (F-04): бизнес-поля склада, закрытые для записи через Admin.
+STOCK_ADMIN_PROTECTED_FIELDS = ('variant', 'quantity', 'reserved_quantity')
 
 
 class StockMovementInline(admin.TabularInline):
-    """Inline для движений внутри Stock."""
+    """Inline для движений внутри Stock.
+
+    PROD-004: StockMovement — аудит складских движений, строки создаёт
+    только InventoryService. Добавление «своих» движений через Admin
+    исказило бы аудит, поэтому inline полностью read-only.
+    """
     model = StockMovement
     extra = 0
     readonly_fields = (
@@ -24,10 +46,26 @@ class StockMovementInline(admin.TabularInline):
         'note', 'created_at',
     )
 
+    def has_add_permission(self, request, obj=None):
+        """Аудит-строки создаёт InventoryService, а не Admin."""
+        return False
+
 
 @admin.register(Stock)
-class StockAdmin(admin.ModelAdmin):
-    """Admin для Stock — остатки на складе."""
+class StockAdmin(ProtectedFieldsAdminMixin, admin.ModelAdmin):
+    """Admin для Stock — остатки на складе.
+
+    PROD-004 (F-04): количество и резерв — read-only (бизнес-счётчики),
+    строки создаются InventoryService.get_or_create_stock(). Операционная
+    настройка low_stock_threshold остаётся редактируемой.
+    """
+
+    # ── PROD-004 (F-04): контракт protected-field guard'а ──
+    protected_fields = STOCK_ADMIN_PROTECTED_FIELDS
+    authoritative_path = (
+        'InventoryService.restock() / adjust_stock() / reserve_stock() '
+        '/ release_stock() / commit_stock()'
+    )
 
     list_display = (
         'variant_sku', 'quantity', 'reserved_quantity',
@@ -35,10 +73,21 @@ class StockAdmin(admin.ModelAdmin):
     )
     list_filter = ('quantity',)
     search_fields = ('variant__sku', 'variant__product__name')
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = (
+        'variant', 'quantity', 'reserved_quantity', 'created_at', 'updated_at',
+    )
     ordering = ('-updated_at',)
     list_per_page = 50
     inlines = (StockMovementInline,)
+
+    def has_add_permission(self, request):
+        """Строки Stock создаёт InventoryService.get_or_create_stock().
+
+        Создание строки через Admin невозможно и по protected-field
+        правилу (variant/quantity/reserved_quantity обязаны равняться
+        дефолтам модели), поэтому кнопка «Добавить» не предлагается.
+        """
+        return False
 
     @admin.display(description='SKU', ordering='variant__sku')
     def variant_sku(self, obj):
