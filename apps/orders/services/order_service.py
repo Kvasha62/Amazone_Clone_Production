@@ -302,41 +302,44 @@ class OrderService:
 
     @staticmethod
     def _handle_inventory_transition(order: Order, new_status: str) -> None:
-        """Coordinate order status changes with inventory."""
+        """Coordinate order status changes with inventory.
+
+        PROD-003 contract (fail-safe, no silent failures):
+
+        - Failures PROPAGATE to the caller. A failed reservation aborts
+          the CONFIRM transition — the order stays PENDING and the calling
+          payment confirmation rolls back, so money-state can never advance
+          without reserved stock. A failed release/commit aborts the
+          CANCELLED/DELIVERED transition; the caller (API view, admin,
+          shipment sync, Celery task) observes the error and may retry.
+        - All three inventory operations are IDEMPOTENT per order
+          (RESERVE-movement pairing, order-level lock), so retrying a
+          failed transition is always safe: the completed part is not
+          applied twice and the missing part is applied once.
+        """
         from apps.inventory.services.inventory_service import InventoryService
 
-        try:
-            if new_status == OrderStatus.CONFIRMED:
-                movements = InventoryService.reserve_stock(order)
-                if movements:
-                    logger.info(
-                        'inventory_reserved_on_confirm',
-                        extra={'order_id': order.pk, 'movements_count': len(movements)},
-                    )
-            elif new_status == OrderStatus.CANCELLED:
-                movements = InventoryService.release_stock(order)
-                if movements:
-                    logger.info(
-                        'inventory_released_on_cancel',
-                        extra={'order_id': order.pk, 'movements_count': len(movements)},
-                    )
-            elif new_status == OrderStatus.DELIVERED:
-                movements = InventoryService.commit_stock(order)
-                if movements:
-                    logger.info(
-                        'inventory_committed_on_deliver',
-                        extra={'order_id': order.pk, 'movements_count': len(movements)},
-                    )
-        except Exception as exc:
-            logger.error(
-                'inventory_transition_error',
-                extra={
-                    'order_id': order.pk,
-                    'order_number': order.order_number,
-                    'new_status': new_status,
-                    'error': str(exc),
-                },
-            )
+        if new_status == OrderStatus.CONFIRMED:
+            movements = InventoryService.reserve_stock(order)
+            if movements:
+                logger.info(
+                    'inventory_reserved_on_confirm',
+                    extra={'order_id': order.pk, 'movements_count': len(movements)},
+                )
+        elif new_status == OrderStatus.CANCELLED:
+            movements = InventoryService.release_stock(order)
+            if movements:
+                logger.info(
+                    'inventory_released_on_cancel',
+                    extra={'order_id': order.pk, 'movements_count': len(movements)},
+                )
+        elif new_status == OrderStatus.DELIVERED:
+            movements = InventoryService.commit_stock(order)
+            if movements:
+                logger.info(
+                    'inventory_committed_on_deliver',
+                    extra={'order_id': order.pk, 'movements_count': len(movements)},
+                )
 
     @staticmethod
     def confirm(order: Order, *, user=None) -> Order:
@@ -557,27 +560,85 @@ class OrderService:
             status=PAYMENT_STATUS_SUCCEEDED,
         )
         if succeeded_payments.exists():
-            try:
-                from apps.payments.services.payment_service import PaymentService
-                for payment in succeeded_payments:
-                    PaymentService.refund_payment(
+            from apps.payments.services.payment_service import PaymentService
+            for payment in succeeded_payments:
+                try:
+                    # Возвращаемый экземпляр — актуальное состояние
+                    # платежа (исходный объект из queryset устаревший).
+                    refunded = PaymentService.refund_payment(
                         payment,
                         reason=f'Отмена заказа {order.order_number}: {reason}',
                         user=user,
                     )
-                    logger.info(
-                        'order_cancel_refund_initiated',
+                    if refunded.refund_pending_amount > 0:
+                        # Провайдер не исполнил возврат: обязательство уже
+                        # зафиксировано в refund_required_amount + событие
+                        # refund_failed; его подхватит retry_pending_refunds.
+                        logger.warning(
+                            'order_cancel_refund_pending',
+                            extra={
+                                'order_id': order.pk,
+                                'payment_id': refunded.pk,
+                                'refund_required_amount': str(
+                                    refunded.refund_required_amount,
+                                ),
+                                'refund_pending_amount': str(
+                                    refunded.refund_pending_amount,
+                                ),
+                            },
+                        )
+                    else:
+                        logger.info(
+                            'order_cancel_refund_initiated',
+                            extra={
+                                'order_id': order.pk,
+                                'payment_id': refunded.pk,
+                                'refund_amount': str(refunded.amount),
+                            },
+                        )
+                except Exception as exc:
+                    # PROD-003: провал возврата НИКОГДА не отбрасывается
+                    # молча. refund_payment фиксирует обязательство сам,
+                    # когда причина — отказ провайдера; здесь ловим
+                    # остальные ошибки (в т.ч. аборт транзакции) и пишем
+                    # durable-обязательство через выделенное соединение,
+                    # которое переживает откат этой транзакции.
+                    logger.error(
+                        'order_cancel_refund_failed',
                         extra={
                             'order_id': order.pk,
                             'payment_id': payment.pk,
-                            'refund_amount': str(payment.amount),
+                            'error': str(exc),
                         },
                     )
-            except Exception as exc:
-                logger.error(
-                    'order_cancel_refund_failed',
-                    extra={'order_id': order.pk, 'error': str(exc)},
-                )
+                    try:
+                        recorded = PaymentService.record_refund_failure_durable(
+                            payment.pk,
+                            reason=(
+                                f'Отмена заказа {order.order_number}: {reason}'
+                            ),
+                            error=str(exc),
+                            user_id=getattr(user, 'pk', None),
+                        )
+                        if not recorded:
+                            logger.error(
+                                'order_cancel_refund_failure_not_recorded',
+                                extra={
+                                    'order_id': order.pk,
+                                    'payment_id': payment.pk,
+                                },
+                            )
+                    except Exception as record_exc:
+                        # Критический след: обязательство не зафиксировано —
+                        # только критический лог + ручная разборка.
+                        logger.critical(
+                            'order_cancel_refund_record_failed',
+                            extra={
+                                'order_id': order.pk,
+                                'payment_id': payment.pk,
+                                'error': str(record_exc),
+                            },
+                        )
 
         logger.info(
             'order_cancelled',

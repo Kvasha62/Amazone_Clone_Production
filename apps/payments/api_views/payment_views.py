@@ -35,7 +35,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.orders.models import Order
-from apps.payments.models import Payment
+from apps.orders.models.order import OrderStatus
+from apps.payments.constants import PAYMENT_EVENT_ORDER_CONFIRM_FAILED
+from apps.payments.exceptions import OrderConfirmationError
+from apps.payments.models import Payment, PaymentEvent
 from apps.payments.serializers import (
     CancelPaymentInputSerializer,
     CreatePaymentInputSerializer,
@@ -395,12 +398,66 @@ class PaymentWebhookView(APIView):
 
         data = input_serializer.validated_data
 
-        payment = PaymentService.handle_webhook(
-            external_id=data['external_id'],
-            event_type=data['event_type'],
-            status=data['status'],
-            payload=data.get('payload', {}),
-        )
+        try:
+            payment = PaymentService.handle_webhook(
+                external_id=data['external_id'],
+                event_type=data['event_type'],
+                status=data['status'],
+                payload=data.get('payload', {}),
+            )
+        except OrderConfirmationError as exc:
+            # PROD-003: подтверждение заказа не удалось — провал обязан
+            # быть наблюдаемым и восстанавливаемым. Транзакция вебхука
+            # уже откатилась, поэтому аудит-событие пишется в НОВОЙ
+            # транзакции и гарантированно сохраняется.
+            payment = Payment.objects.filter(
+                external_id=data['external_id'],
+            ).first()
+            if payment is not None:
+                PaymentEvent.objects.create(
+                    payment=payment,
+                    event_type=PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
+                    payload={
+                        'error': str(exc),
+                        'order_status': exc.order_status or '',
+                    },
+                    note='Webhook получен, но подтверждение заказа не удалось.',
+                )
+                if exc.order_status in (
+                    OrderStatus.DELIVERED,
+                    OrderStatus.CANCELLED,
+                ):
+                    # Заказ уже завершён: деньги за завершённый заказ
+                    # принимать нельзя. Закрываем платёж и отвечаем 200,
+                    # чтобы провайдер не повторял доставку бесконечно.
+                    try:
+                        PaymentService.fail_payment(
+                            payment,
+                            payload={
+                                'error': str(exc),
+                                'order_status': exc.order_status,
+                            },
+                            note='Оплата поступила после завершения заказа.',
+                        )
+                    except Exception as fail_exc:
+                        logger.error(
+                            'webhook_close_payment_failed',
+                            extra={
+                                'payment_id': payment.pk,
+                                'error': str(fail_exc),
+                            },
+                        )
+                    return Response(
+                        {'detail': 'Заказ завершён; платёж отклонён.'},
+                        status=status.HTTP_200_OK,
+                    )
+            # Резервирование стока не удалось или сбой БД: платёж
+            # откатился вместе с транзакцией. 502 → провайдер повторит
+            # доставку, а повторная попытка идемпотентна.
+            return Response(
+                {'detail': 'Подтверждение заказа не удалось; повторите запрос позже.'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         if payment is None:
             # Платёж не найден — всё равно 200,

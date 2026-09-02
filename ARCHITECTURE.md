@@ -452,8 +452,36 @@ existing orders.
 - **Status FSM**: `PENDING → PROCESSING → SUCCEEDED / FAILED / CANCELLED`
 - `SUCCEEDED → REFUNDED` (full or partial)
 - `create_payment()`: validates `amount == order.total`
-- `confirm_payment()`: catches `ValidationError` and `DatabaseError` specifically
 - `handle_webhook()`: idempotent webhook processing
+
+**PROD-003 — fail-safe подтверждение и возвраты (order ↔ inventory ↔ payment):**
+
+- `confirm_payment()` больше не «проглатывает» сбой подтверждения
+  заказа. Сбой классифицируется по свежему статусу заказа:
+  резервирование не удалось (или ошибка БД) → `OrderConfirmationError`,
+  транзакция подтверждения откатывается целиком — платёж остаётся в
+  предыдущем статусе, заказ остаётся `PENDING`; вебхук-обработчик
+  фиксирует durable-событие `order_confirm_failed` и отвечает 502
+  (провайдер повторит доставку). Если заказ уже завершён
+  (`DELIVERED`/`CANCELLED`) — платёж закрывается (`FAILED`), ответ 200.
+  Если заказ уже продвинут staff/admin — `SUCCEEDED` консистентен,
+  событие `order_confirm_failed` делает расхождение наблюдаемым.
+- Повторная (идемпотентная) доставка вебхука для `SUCCEEDED` платежа
+  при `PENDING` заказе сама «залечивает» расхождение — повторное
+  подтверждение заказа выполняется автоматически.
+- Провал исполнения возврата НЕ теряется: `refund_payment()` фиксирует
+  retryable-обязательство `Payment.refund_required_amount`
+  (`refund_pending_amount > 0` при долге) + событие `refund_failed`.
+  `PaymentService.retry_pending_refunds()` и команда
+  `retry_pending_refunds` доводят обязательства до конца; повторные
+  запуски идемпотентны. При ошибке БД внутри `OrderService.cancel()`
+  обязательство фиксируется через выделенное durable-соединение
+  (`record_refund_failure_durable`) — запись переживает откат основной
+  транзакции.
+- `reconcile_order_coordination` — команда реконсиляции обеих сторон:
+  склад (резерв/освобождение/списание по статусу заказа, идемпотентно)
+  и платежи (`SUCCEEDED`+`PENDING` → повторное подтверждение;
+  `SUCCEEDED`+`CANCELLED` → обязательство возврата).
 
 **Current implementation**: mock provider with `external_id = 'mock_<uuid>'`.
 The webhook endpoint is `AllowAny` (no JWT — the provider sends the request
@@ -658,9 +686,10 @@ state** — rows where a lost update would violate a business invariant
 
 | Operation                          | Rows locked                    |
 |------------------------------------|--------------------------------|
-| `InventoryService.reserve_stock()` | `Stock` row for each variant   |
-| `InventoryService.release_stock()` | `Stock` row for each variant   |
-| `InventoryService.commit_stock()`  | `Stock` row for each variant   |
+| `InventoryService.reserve_stock()` | `Order` row first, then `Stock` row for each variant (PROD-003) |
+| `InventoryService.release_stock()` | `Order` row first, then `Stock` row for each variant (PROD-003) |
+| `InventoryService.commit_stock()`  | `Order` row first, then `Stock` row for each variant (PROD-003) |
+| `PaymentService.retry_pending_refunds()` | `Payment` row per pending refund obligation (PROD-003) |
 | `CartService` during merge         | `Cart` row (user + guest)      |
 | `OrderService.create_from_cart()`  | `Cart` row                     |
 | `PaymentService` status transitions| `Payment` row                  |
@@ -701,6 +730,10 @@ def reserve_stock(order):
 | Stock reserved > quantity   | `CheckConstraint(reserved_quantity__lte=F('quantity'))` |
 | Concurrent review create/update/delete/approve (lost aggregate update) | `select_for_update()` locks the authoritative `Product` row before AVG/COUNT recompute (ARCH-001 H1) |
 | Concurrent price/variant changes (stale price bounds) | `select_for_update()` locks the authoritative `Product` row before bounds recompute (ARCH-001 Stage 2) |
+| Paid order without reserved stock (oversell) | Reservation failure propagates: `CONFIRMED` transition (and the calling payment confirmation) rolls back atomically; order stays `PENDING` (PROD-003) |
+| Double reserve / release / commit of one order | Idempotency via `RESERVE`-movement pairing (`StockMovement.related_movement`) + order-level lock (`Order` → `Stock`): repeated/concurrent calls are no-ops (PROD-003) |
+| Silent refund loss on cancellation | Refund obligation `refund_required_amount` + `refund_failed` event + `retry_pending_refunds`; durable write survives rollback of the cancel transaction (PROD-003) |
+| Payment `SUCCEEDED` while order stuck `PENDING` | Idempotent webhook re-entry re-confirms the order; `reconcile_order_coordination` command heals both directions (PROD-003) |
 
 ---
 
@@ -727,6 +760,27 @@ cannot bypass coupon release, inventory, or payment refund orchestration.
 Staff `PATCH /api/v1/orders/{order_number}/status/` with
 `{"status": "cancelled"}` routes to `cancel()`; other status values still
 use `transition_status()`.
+
+**Fail-safe inventory coordination (PROD-003).** The order → inventory
+calls are no longer best-effort:
+
+- Failures **propagate**. A failed `reserve_stock()` aborts the
+  `CONFIRMED` transition — the order stays `PENDING` and the calling
+  payment confirmation rolls back with it, so a payment can never be
+  `SUCCEEDED` without reserved stock. A failed `commit_stock()` aborts
+  `DELIVERED` (order stays `SHIPPED`); a failed `release_stock()` aborts
+  `cancel()` entirely (status, coupon usage and refunds stay consistent).
+- All three operations are **idempotent per order**: `reserve_stock()`
+  is a no-op when `RESERVE` movements already exist; `release_stock()` /
+  `commit_stock()` process only `RESERVE` movements without a paired
+  `RELEASE` / `OUT` movement (`StockMovement.related_movement`), and all
+  three acquire the `Order` row lock first (`Order` → `Stock`), so
+  repeated and concurrent calls can never double-decrement or
+  double-reserve. Retrying a failed transition is therefore always safe.
+- Recovery entrypoints: `InventoryService.reconcile_order(order)`
+  (applies the missing operation for the order's current status) and the
+  `reconcile_order_coordination` management command (inventory +
+  payment/order reconciliation in one place).
 
 Coupon coordination (`apply_coupon` / `remove_coupon` / `cancel`) follows the
 same pattern: `OrderService` owns the transaction and locks

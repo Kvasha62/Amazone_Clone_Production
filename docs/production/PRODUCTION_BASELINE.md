@@ -42,3 +42,58 @@ The baseline SHA may only be advanced by a dedicated `PROD-xxx` ticket that:
 - updates this document in the same pull request.
 
 No other change may modify the baseline record.
+
+## Baseline advance — PROD-003 (in review, PR #5)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-003 — Make order↔inventory↔payment coordination fail-safe |
+| Pull request | #5 (`Kvasha62/Amazone_Clone_Production`) — OPEN, not merged |
+| Branch | `arena/01a05e31-amazone-clone-production` |
+| Final PR HEAD SHA | `3925846335683a2f20c66873d65cbafe7d57aca1` |
+| Final PR HEAD commit title | `PROD-003: fix baseline advance record to name the final code head with its CI run` |
+| CI on final PR HEAD | ✅ green — check run `ci` `completed` / `success`, GitHub Actions run `33594581351` |
+| New baseline SHA (last code-bearing commit of PR #5) | `df74d6a945fe813ad02a7818409173ef2df6b742` |
+| Baseline commit title | `PROD-003: move inventory concurrency fixes into InventoryService (remove monkey-patch)` |
+| CI on baseline SHA | ✅ green — check run `ci` `completed` / `success`, GitHub Actions run `33594177345` |
+| Test suite on baseline SHA | `Ran 1159 tests in 120.694s — OK` (PostgreSQL 18.6, Python 3.13.15, Django 6.1); migrations check OK |
+| Approved on | 2026-09-02 |
+
+**Baseline semantics.** Per the rules above, the baseline fixes the last
+**code-bearing** commit of the PR: `df74d6a945fe813ad02a7818409173ef2df6b742`.
+The final PR HEAD `3925846335683a2f20c66873d65cbafe7d57aca1` is a docs-only
+certification commit on top of it (this record itself) and therefore is
+**not** the baseline SHA — it is recorded explicitly with its own commit
+title and its own green CI run, so «baseline SHA», «final PR HEAD» and CI
+never contradict each other. The advance takes effect when PR #5 is merged
+(PROD-003 is not merged yet).
+
+Scope of PROD-003 (all in this PR, CI green on the baseline SHA):
+
+- Fail-safe coordination `order ↔ inventory ↔ payment`:
+  inventory transitions lock the `Order` row first and pair
+  RESERVE/RELEASE/OUT movements (idempotent reserve/release/commit,
+  no double-decrement under concurrency — covered by
+  `apps/inventory/tests/test_idempotency.py`);
+- all inventory concurrency fixes (release/commit race exclusion,
+  DELIVERED reconciliation with reserve recovery) live canonically in
+  `apps/inventory/services/inventory_service.py` — the runtime
+  monkey-patching module `apps/inventory/services/prod003_ci_fixes.py`
+  is removed and its reintroduction is guarded by tests
+  (`InventoryServiceCanonicalImplementationTests`);
+- refund failures are never lost: `refund_required_amount` +
+  `refund_failed` events, `retry_pending_refunds` settles them
+  idempotently; durable recording writes the obligation through an
+  independent connection and survives rollback of the carrier
+  transaction (`apps/payments/tests/test_refund_recovery.py`);
+- `OrderConfirmationError` + webhook 502/200 contract for
+  payment↔order confirmation recovery;
+- management commands `retry_pending_refunds`,
+  `reconcile_order_coordination`.
+
+`main` is not modified or merged by this ticket: it remains at
+`3fff49f158cf2aa6f93fd5bf98053c60de57c4b2` and the PROD-000 record above
+stays the frozen reference for `main` until PR #5 is merged. CI is green
+on both the baseline SHA (`33594177345`) and the final PR HEAD
+(`33594581351`).
+

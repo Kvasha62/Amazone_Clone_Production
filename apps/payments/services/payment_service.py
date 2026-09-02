@@ -41,6 +41,8 @@ from apps.payments.constants import (
     PAYMENT_EVENT_ERROR,
     PAYMENT_EVENT_REFUND_COMPLETED,
     PAYMENT_EVENT_REFUND_INITIATED,
+    PAYMENT_EVENT_REFUND_FAILED,
+    PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
     PAYMENT_EVENT_STATUS_CHANGED,
     PAYMENT_EVENT_WEBHOOK_RECEIVED,
     PAYMENT_METHOD_CARD,
@@ -52,10 +54,10 @@ from apps.payments.constants import (
     PAYMENT_STATUS_SUCCEEDED,
     PAYMENT_STATUS_TRANSITIONS,
 )
+from apps.payments.exceptions import OrderConfirmationError
 from apps.payments.models import Payment, PaymentEvent
 
 logger = logging.getLogger(__name__)
-
 
 class PaymentService:
     """
@@ -269,12 +271,16 @@ class PaymentService:
         # (некоторые провайдеры мгновенно отвечают SUCCEEDED)
         allowed = PAYMENT_STATUS_TRANSITIONS.get(payment.status, [])
         if PAYMENT_STATUS_SUCCEEDED not in allowed:
-            # Особый случай: если уже SUCCEEDED — идемпотентно возвращаем
+            # Особый случай: если уже SUCCEEDED — идемпотентно возвращаем.
+            # PROD-003: перед возвратом пробуем «залечить» расхождение
+            # платёж↔заказ (SUCCEEDED при PENDING-заказе) — повторная
+            # доставка вебхука самовосстанавливает состояние.
             if payment.status == PAYMENT_STATUS_SUCCEEDED:
                 logger.info(
                     'payment_already_confirmed',
                     extra={'payment_id': payment.pk},
                 )
+                PaymentService._reconcile_order_confirmation(payment)
                 return payment
             raise ValidationError({
                 'detail': (
@@ -314,20 +320,57 @@ class PaymentService:
         try:
             OrderService.confirm(payment.order)
         except (DRFValidationError, DatabaseError) as exc:
-            # DRFValidationError: заказ уже подтверждён, неверный статус и т.д.
-            # DatabaseError: проблемы с БД (connection, constraint и т.д.)
-            # НЕ ловим Exception — KeyboardInterrupt, SystemExit и прочие
-            # должны пробрасываться наверх.
+            # PROD-003: сбой подтверждения заказа больше не молчаливый.
+            # Классифицируем по актуальному статусу заказа:
+            order_status = PaymentService._fresh_order_status(payment.order_id)
+            db_error = isinstance(exc, DatabaseError) or order_status is None
+
+            if db_error or order_status == OrderStatus.PENDING:
+                # Резервирование стока не удалось (или сбой БД): платёж
+                # ОБЯЗАН откатиться вместе с транзакцией — денежное
+                # состояние не уходит вперёд без зарезервированного стока.
+                # Обработчик (PaymentWebhookView) фиксирует событие
+                # order_confirm_failed и возвращает 502 — провайдер
+                # повторит запрос.
+                raise OrderConfirmationError(
+                    str(exc),
+                    order_status=order_status,
+                    db_error=db_error,
+                )
+
+            if order_status in (OrderStatus.DELIVERED, OrderStatus.CANCELLED):
+                # Заказ уже завершён: SUCCEEDED был бы неконсистентен.
+                # Откат + обработка на уровне вебхука (закрытие платежа).
+                raise OrderConfirmationError(
+                    str(exc),
+                    order_status=order_status,
+                    db_error=False,
+                )
+
+            # Заказ перешёл в ненарушающее состояние другим путём
+            # (staff/admin подтвердил заранее): SUCCEEDED консистентен.
+            # Фиксируем событие — расхождение должно быть наблюдаемым.
+            PaymentEvent.objects.create(
+                payment=payment,
+                event_type=PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
+                old_status=old_status,
+                new_status=PAYMENT_STATUS_SUCCEEDED,
+                payload={'error': str(exc), 'order_status': order_status},
+                note=(
+                    'Платёж подтверждён; заказ уже находится в статусе, '
+                    'отличном от PENDING.'
+                ),
+            )
             logger.error(
-                'payment_confirmed_but_order_failed',
+                'payment_confirmed_order_already_advanced',
                 extra={
                     'payment_id': payment.pk,
                     'order_id': payment.order_id,
+                    'order_status': order_status,
                     'error': str(exc),
                 },
             )
-            # Не откатываем платёж — деньги получены.
-            # Order застрянет в PENDING → ручная разбирка.
+            return payment
 
         logger.info(
             'payment_confirmed',
@@ -471,14 +514,21 @@ class PaymentService:
         user=None,
     ) -> Payment:
         """
-        Оформляет возврат средств.
+        Оформляет возврат средств (PROD-003: fail-safe).
 
         АЛГОРИТМ:
-          1. Проверить что платёж SUCCEEDED
+          1. Проверить что платёж SUCCEEDED (блокировка строки)
           2. Определить сумму возврата (вся или частичная)
-          3. Обновить refund_amount
-          4. Если refund_amount == amount → REFUNDED
-          5. Создать PaymentEvent
+          3. Зафиксировать намерение (PaymentEvent refund_initiated)
+          4. Вызвать провайдера (_settle_refund; mock исполняет сразу)
+          5. При отказе провайдера — ЗАФИКСИРОВАТЬ retryable-обязательство
+             refund_required_amount + PaymentEvent(refund_failed)
+
+        Сбой исполнения возврата НЕ выбрасывается наружу и НЕ теряется:
+        платёж остаётся SUCCEEDED с refund_pending_amount > 0, а
+        retry_pending_refunds() / команда `retry_pending_refunds`
+        доведут возврат до конца. ValidationError по-прежнему
+        выбрасывается для некорректных вызовов (программные ошибки).
 
         ПОЧЕМУ ПОДДЕРЖИВАЕМ ЧАСТИЧНЫЙ ВОЗВРАТ:
           • Возврат одной позиции из заказа (не всего заказа)
@@ -512,20 +562,121 @@ class PaymentService:
             })
 
         old_status = payment.status
-        payment.refund_amount = new_total_refund
         payment.refund_reason = reason
+        payment.save(update_fields=['refund_reason', 'updated_at'])
 
-        # Если вернули всю сумму → REFUNDED
-        if new_total_refund >= payment.amount:
+        # Аудит: намерение возврата фиксируется ДО вызова провайдера.
+        PaymentEvent.objects.create(
+            payment=payment,
+            event_type=PAYMENT_EVENT_REFUND_INITIATED,
+            old_status=old_status,
+            new_status=old_status,
+            performed_by=user,
+            payload={'refund_amount': str(refund_amount)},
+            note=reason or f'Возврат {refund_amount}₽',
+        )
+
+        try:
+            # Savepoint: сбой исполнения возврата не должен откатывать
+            # уже зафиксированное намерение.
+            with transaction.atomic():
+                PaymentService._settle_refund(
+                    payment,
+                    refund_amount,
+                    reason=reason,
+                    user=user,
+                )
+        except Exception as exc:
+            # PROD-003: провайдер не исполнил возврат. Фиксируем
+            # retryable-обязательство (refund_required_amount) и событие
+            # refund_failed — НИКАКОЙ молчаливой потери.
+            payment.refund_required_amount = max(
+                payment.refund_required_amount,
+                new_total_refund,
+            )
+            payment.save(update_fields=[
+                'refund_required_amount',
+                'updated_at',
+            ])
+            PaymentEvent.objects.create(
+                payment=payment,
+                event_type=PAYMENT_EVENT_REFUND_FAILED,
+                old_status=old_status,
+                new_status=old_status,
+                performed_by=user,
+                payload={
+                    'error': str(exc),
+                    'refund_amount': str(refund_amount),
+                    'refund_required_amount': str(
+                        payment.refund_required_amount,
+                    ),
+                },
+                note=(
+                    'Провайдер не исполнил возврат — зафиксировано '
+                    'обязательство повторной попытки.'
+                ),
+            )
+            logger.error(
+                'payment_refund_settle_failed',
+                extra={
+                    'payment_id': payment.pk,
+                    'refund_amount': str(refund_amount),
+                    'refund_required_amount': str(
+                        payment.refund_required_amount,
+                    ),
+                    'error': str(exc),
+                },
+            )
+            # Вернуть экземпляр к актуальному состоянию БД: исполнение
+            # возврата откатилось, обязательство — зафиксировано.
+            payment.refresh_from_db()
+
+        logger.info(
+            'payment_refunded',
+            extra={
+                'payment_id': payment.pk,
+                'refund_amount': str(refund_amount),
+                'total_refunded': str(payment.refund_amount),
+                'refund_required_amount': str(
+                    payment.refund_required_amount,
+                ),
+                'new_status': payment.status,
+            },
+        )
+
+        return payment
+
+    @staticmethod
+    def _settle_refund(
+        payment: Payment,
+        settled_amount: Decimal,
+        *,
+        reason: str = '',
+        user=None,
+    ) -> Payment:
+        """Применить подтверждённый провайдером возврат (PROD-003).
+
+        Вызывается ИЗНУТРИ transaction.atomic при удерживаемой блокировке
+        строки Payment. В mock-интеграции возврат исполняется сразу;
+        при подключении реального провайдера здесь будет вызов его API.
+
+        Статус REFUNDED выставляется только когда refund_amount покрыл
+        ВСЮ сумму платежа (существующий контракт).
+        """
+        payment.refund_amount = payment.refund_amount + settled_amount
+        payment.refund_reason = reason or payment.refund_reason
+        if payment.refund_amount >= payment.amount:
             payment.status = PAYMENT_STATUS_REFUNDED
             payment.refunded_at = timezone.now()
 
         payment.save(update_fields=[
-            'status', 'refund_amount', 'refund_reason',
-            'refunded_at', 'updated_at',
+            'status',
+            'refund_amount',
+            'refund_reason',
+            'refunded_at',
+            'updated_at',
         ])
 
-        # Аудит
         event_type = (
             PAYMENT_EVENT_REFUND_COMPLETED
             if payment.status == PAYMENT_STATUS_REFUNDED
@@ -534,24 +685,476 @@ class PaymentService:
         PaymentEvent.objects.create(
             payment=payment,
             event_type=event_type,
-            old_status=old_status,
+            old_status=PAYMENT_STATUS_SUCCEEDED,
             new_status=payment.status,
             performed_by=user,
-            payload={'refund_amount': str(refund_amount)},
-            note=reason or f'Возврат {refund_amount}₽',
-        )
-
-        logger.info(
-            'payment_refunded',
-            extra={
-                'payment_id': payment.pk,
-                'refund_amount': str(refund_amount),
-                'total_refunded': str(new_total_refund),
-                'new_status': payment.status,
+            payload={
+                'refund_amount': str(settled_amount),
+                'total_refunded': str(payment.refund_amount),
             },
+            note=reason or f'Возврат {settled_amount}₽',
+        )
+        return payment
+
+    @staticmethod
+    def retry_pending_refunds(
+        payment_ids: list[int] | None = None,
+    ) -> dict:
+        """Исполнить все незакрытые обязательства возвратов (PROD-003).
+
+        Находит SUCCEEDED-платежи с refund_required_amount >
+        refund_amount и доводит refund_amount до обязательства.
+        Каждый платёж обрабатывается в собственной транзакции с
+        блокировкой строки; повторный запуск безопасен (идемпотентен).
+
+        Возвращает статистику: {'found', 'settled', 'failed'}.
+        """
+        qs = (
+            Payment.objects
+            .filter(status=PAYMENT_STATUS_SUCCEEDED)
+            .filter(refund_required_amount__gt=models.F('refund_amount'))
+        )
+        if payment_ids:
+            qs = qs.filter(pk__in=payment_ids)
+
+        stats = {'found': qs.count(), 'settled': 0, 'failed': 0}
+        for payment in list(qs.order_by('pk')):
+            try:
+                with transaction.atomic():
+                    locked = (
+                        Payment.objects
+                        .select_for_update()
+                        .get(pk=payment.pk)
+                    )
+                    if locked.status != PAYMENT_STATUS_SUCCEEDED:
+                        continue
+                    remaining = (
+                        locked.refund_required_amount - locked.refund_amount
+                    )
+                    if remaining <= 0:
+                        continue
+                    PaymentService._settle_refund(locked, remaining)
+                stats['settled'] += 1
+            except Exception as exc:
+                # Не молчаливо: статистика + ERROR-лог; обязательство
+                # остаётся в БД и будет повторено следующим запуском.
+                stats['failed'] += 1
+                logger.error(
+                    'refund_retry_failed',
+                    extra={
+                        'payment_id': payment.pk,
+                        'error': str(exc),
+                    },
+                )
+        return stats
+
+    @staticmethod
+    def _record_refund_obligation(
+        payment: Payment,
+        *,
+        reason: str = '',
+        error: str = '',
+        user_id=None,
+        using: str | None = None,
+    ) -> bool:
+        """Ядро фиксации обязательства возврата (PROD-003).
+
+        Вызывается для УЖЕ заблокированного платежа. Устанавливает
+        refund_required_amount = amount и создаёт PaymentEvent
+        (refund_failed). Идемпотентно: если обязательство уже покрывает
+        оставшуюся сумму, ничего не меняется и событие не дублируется.
+        `using` — alias соединения (None = default).
+        """
+        remaining = payment.amount - payment.refund_amount
+        if remaining <= 0:
+            # Долга нет — состояние уже консистентно.
+            return True
+        if payment.refund_required_amount >= remaining:
+            # Обязательство уже зафиксировано — идемпотентный
+            # повторный вызов не создаёт дублирующих событий.
+            return True
+        requirement = payment.amount
+        payment_manager = (
+            Payment.objects.using(using) if using else Payment.objects
+        )
+        event_manager = (
+            PaymentEvent.objects.using(using) if using else PaymentEvent.objects
+        )
+        payment_manager.filter(pk=payment.pk).update(
+            refund_required_amount=requirement,
+        )
+        event_manager.create(
+            payment=payment,
+            event_type=PAYMENT_EVENT_REFUND_FAILED,
+            old_status=PAYMENT_STATUS_SUCCEEDED,
+            new_status=PAYMENT_STATUS_SUCCEEDED,
+            performed_by_id=user_id,
+            payload={
+                'error': error,
+                'refund_required_amount': str(requirement),
+            },
+            note=(
+                reason or
+                'Возврат не выполнен — зафиксировано обязательство '
+                'повторной попытки.'
+            ),
+        )
+        return True
+
+    @staticmethod
+    def record_refund_failure(
+        payment: Payment,
+        *,
+        reason: str = '',
+        error: str = '',
+        user_id=None,
+    ) -> bool:
+        """Зафиксировать обязательство возврата в собственной транзакции.
+
+        Для вызовов из здорового контекста (реконсиляция, команды):
+        метод сам блокирует строку платежа и пишет через default-
+        соединение. Возвращает True, если обязательство зафиксировано
+        (или уже было зафиксировано / долга нет).
+        """
+        with transaction.atomic():
+            locked = (
+                Payment.objects
+                .select_for_update()
+                .get(pk=payment.pk)
+            )
+            if locked.status != PAYMENT_STATUS_SUCCEEDED:
+                return False
+            return PaymentService._record_refund_obligation(
+                locked,
+                reason=reason,
+                error=error,
+                user_id=user_id,
+            )
+
+    @staticmethod
+    def record_refund_failure_durable(
+        payment_id: int,
+        *,
+        reason: str = '',
+        error: str = '',
+        user_id=None,
+    ) -> bool:
+        """Зафиксировать обязательство возврата DURABLE (PROD-003).
+
+        Пишет через НЕЗАВИСИМОЕ psycopg-соединение (строится из настроек
+        alias'а default, без участия Django ORM), поэтому запись
+        переживает откат/аборт основной транзакции — типовой сценарий:
+        ошибка БД внутри OrderService.cancel(), когда обычная запись
+        была бы откачена вместе с транзакцией.
+
+        ПОЧЕМУ НЕ alias DATABASES['payments_audit']:
+          • тест-раннер блокирует соединения к alias'ам, не объявленным
+            в TestCase.databases (DatabaseOperationForbidden), а в рантайме
+            alias — это отдельный connection pool без преимуществ;
+          • независимое соединение — это классический outbox-паттерн
+            и единственный механизм, который гарантированно переживает
+            аборт несущей транзакции.
+
+        ГАРАНТИЯ НЕБЛОКИРОВКИ (guard in_atomic_block):
+          вызов возможен внутри атомарного блока вызывающего кода
+          (cancel() так и делает). Если строка платежа удерживается
+          несущей транзакцией, UPDATE на независимом соединении мог бы
+          висеть вечно (самоблокировка на одном потоке) — поэтому
+          соединение создаётся с lock_timeout/statement_timeout:
+          провал ограничен во времени и возвращает False + CRITICAL.
+          (Классический трюк с CHECKPOINT-пробой здесь не используется:
+          CHECKPOINT требует привилегий pg_checkpoint и недопустим как
+          runtime-зависимость; состояние транзакции несущего соединения
+          читается напрямую через in_atomic_block.)
+
+        Идемпотентность: UPDATE выполняется с guard-условием
+        (refund_required_amount < amount - refund_amount), повторный
+        вызов не дублирует ни обязательство, ни событие refund_failed.
+        True возвращается ТОЛЬКО если обязательство гарантированно
+        зафиксировано в БД (или уже было зафиксировано ранее).
+        """
+        from django.db import connections
+        from django.db import transaction as django_transaction
+
+        connection = connections['default']
+        if connection.vendor != 'postgresql':
+            # Durable-гарантия возможна только на PostgreSQL: независимое
+            # соединение к той же БД — на SQLite это другая (изолированная)
+            # in-memory/файловая БД, запись не была бы видна приложению.
+            logger.critical(
+                'record_refund_failure_durable_failed',
+                extra={
+                    'payment_id': payment_id,
+                    'error': (
+                        f'durable recording requires PostgreSQL backend, '
+                        f'got {connection.vendor!r}'
+                    ),
+                },
+            )
+            return False
+
+        try:
+            import psycopg
+            from psycopg.types.json import Jsonb
+        except ImportError as exc:  # pragma: no cover — requirements.txt
+            logger.critical(
+                'record_refund_failure_durable_failed',
+                extra={'payment_id': payment_id, 'error': str(exc)},
+            )
+            return False
+
+        settings_dict = connection.settings_dict
+        conn_kwargs = {
+            'dbname': settings_dict['NAME'],
+            'user': settings_dict['USER'],
+            'password': settings_dict['PASSWORD'] or None,
+            'connect_timeout': 5,
+            # Ограничение времени ожидания блокировок и выполнения
+            # запроса: при конфликте блокировок с несущей транзакцией
+            # падаем быстро и честно, а не висим.
+            'options': '-c lock_timeout=3000 -c statement_timeout=15000',
+        }
+        if settings_dict.get('HOST'):
+            conn_kwargs['host'] = settings_dict['HOST']
+        if settings_dict.get('PORT'):
+            conn_kwargs['port'] = settings_dict['PORT']
+
+        in_atomic_block = (
+            django_transaction.get_connection().in_atomic_block
         )
 
-        return payment
+        try:
+            with psycopg.connect(**conn_kwargs) as audit_conn:
+                with audit_conn.transaction():
+                    with audit_conn.cursor() as cur:
+                        cur.execute(
+                            'SELECT status, amount, refund_amount, '
+                            'refund_required_amount '
+                            'FROM payments_payment WHERE id = %s',
+                            (payment_id,),
+                        )
+                        row = cur.fetchone()
+
+                    if row is None:
+                        # Платёж не существует — фиксировать нечего.
+                        return False
+
+                    status, amount, refund_amount, refund_required_amount = row
+                    if status != PAYMENT_STATUS_SUCCEEDED:
+                        return False
+
+                    remaining = amount - refund_amount
+                    if remaining <= 0:
+                        # Долга нет — состояние уже консистентно.
+                        return True
+                    if refund_required_amount >= remaining:
+                        # Обязательство уже зафиксировано — идемпотентный
+                        # повторный вызов ничего не дублирует.
+                        return True
+
+                    requirement = amount
+                    now = timezone.now()
+                    note = (
+                        reason
+                        or 'Возврат не выполнен — зафиксировано '
+                           'обязательство повторной попытки.'
+                    )
+                    payload = Jsonb({
+                        'error': error,
+                        'refund_required_amount': str(requirement),
+                    })
+
+                    with audit_conn.cursor() as cur:
+                        # Guard-условия в WHERE делают запись идемпотентной
+                        # и не позволяют затереть результат параллельной
+                        # фиксации/расчёта обязательства.
+                        cur.execute(
+                            'UPDATE payments_payment '
+                            'SET refund_required_amount = %s, updated_at = %s '
+                            'WHERE id = %s '
+                            '  AND status = %s '
+                            '  AND refund_amount = %s '
+                            '  AND refund_required_amount < %s',
+                            (
+                                requirement,
+                                now,
+                                payment_id,
+                                PAYMENT_STATUS_SUCCEEDED,
+                                refund_amount,
+                                remaining,
+                            ),
+                        )
+                        updated = cur.rowcount == 1
+                        if updated:
+                            cur.execute(
+                                'INSERT INTO payments_paymentevent '
+                                '(created_at, updated_at, payment_id, '
+                                ' event_type, old_status, new_status, '
+                                ' payload, external_event_id, '
+                                ' performed_by_id, note) '
+                                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, '
+                                '        %s, %s)',
+                                (
+                                    now,
+                                    now,
+                                    payment_id,
+                                    PAYMENT_EVENT_REFUND_FAILED,
+                                    PAYMENT_STATUS_SUCCEEDED,
+                                    PAYMENT_STATUS_SUCCEEDED,
+                                    payload,
+                                    '',
+                                    user_id,
+                                    note,
+                                ),
+                            )
+
+                    if updated:
+                        return True
+
+                    # Потеряли гонку с параллельным изменением строки —
+                    # перепроверяем фактическое состояние.
+                    with audit_conn.cursor() as cur:
+                        cur.execute(
+                            'SELECT status, amount, refund_amount, '
+                            'refund_required_amount '
+                            'FROM payments_payment WHERE id = %s',
+                            (payment_id,),
+                        )
+                        row = cur.fetchone()
+                    if row is None or row[0] != PAYMENT_STATUS_SUCCEEDED:
+                        return False
+                    _, amount, refund_amount, refund_required_amount = row
+                    remaining = amount - refund_amount
+                    if refund_required_amount >= remaining:
+                        # Параллельная фиксация уже покрыла обязательство.
+                        return True
+                    logger.critical(
+                        'record_refund_failure_durable_failed',
+                        extra={
+                            'payment_id': payment_id,
+                            'error': 'refund obligation remains uncovered '
+                                     'after guarded update',
+                        },
+                    )
+                    return False
+        except Exception as exc:
+            # НЕ молчаливо: durable-запись — последняя линия обороны,
+            # её провал обязан оставить критический след в логе.
+            logger.critical(
+                'record_refund_failure_durable_failed',
+                extra={
+                    'payment_id': payment_id,
+                    'error': str(exc),
+                    'in_atomic_block': in_atomic_block,
+                },
+            )
+            return False
+
+    @staticmethod
+    def _fresh_order_status(order_id: int) -> str | None:
+        """Свежий статус заказа; None, если прочитать не удалось.
+
+        Используется для классификации сбоя подтверждения заказа:
+        статус читается отдельным запросом (в том числе когда
+        транзакция-носитель уже не может выполнять запросы).
+        """
+        from apps.orders.models import Order
+
+        try:
+            return Order.objects.only('status').get(pk=order_id).status
+        except Exception:  # noqa: BLE001 — probe; caller classifies.
+            return None
+
+    @staticmethod
+    def _reconcile_order_confirmation(payment: Payment) -> None:
+        """Залечить расхождение «SUCCEEDED платёж + PENDING заказ».
+
+        Вызывается из идемпотентной ветки confirm_payment (повторная
+        доставка вебхука) и из команды реконсиляции. Сбой повторного
+        подтверждения фиксируется событием order_confirm_failed —
+        расхождение остаётся наблюдаемым.
+        """
+        from apps.orders.services.order_service import OrderService
+
+        order_status = PaymentService._fresh_order_status(payment.order_id)
+        if order_status != OrderStatus.PENDING:
+            return
+        try:
+            OrderService.confirm(payment.order)
+            logger.info(
+                'payment_order_reconciled',
+                extra={
+                    'payment_id': payment.pk,
+                    'order_id': payment.order_id,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — фиксируем, не теряем.
+            logger.error(
+                'payment_reconcile_failed',
+                extra={
+                    'payment_id': payment.pk,
+                    'order_id': payment.order_id,
+                    'error': str(exc),
+                },
+            )
+            PaymentEvent.objects.create(
+                payment=payment,
+                event_type=PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
+                payload={'error': str(exc), 'phase': 'reconcile'},
+                note='Реконсиляция подтверждения заказа не удалась.',
+            )
+
+    @staticmethod
+    def reconcile_succeeded_payment(payment: Payment) -> str:
+        """Реконсиляция SUCCEEDED-платежа с его заказом (PROD-003).
+
+        Точка восстановления для команды `reconcile_order_coordination`
+        и ручной разборки. Возвращает:
+          'skipped'         — платёж не SUCCEEDED;
+          'ok'              — платёж и заказ консистентны;
+          'confirmed'       — заказ был PENDING и подтверждён;
+          'confirm_failed'  — подтверждение снова не удалось (событие есть);
+          'refund_required' — заказ отменён: обязательство возврата
+                              зафиксировано, подхватит retry_pending_refunds.
+        """
+        from apps.orders.services.order_service import OrderService
+
+        payment = Payment.objects.get(pk=payment.pk)
+        if payment.status != PAYMENT_STATUS_SUCCEEDED:
+            return 'skipped'
+
+        order_status = PaymentService._fresh_order_status(payment.order_id)
+        if order_status == OrderStatus.PENDING:
+            try:
+                with transaction.atomic():
+                    OrderService.confirm(payment.order)
+                return 'confirmed'
+            except Exception as exc:  # noqa: BLE001 — фиксируем, не теряем.
+                logger.error(
+                    'reconcile_confirm_failed',
+                    extra={
+                        'payment_id': payment.pk,
+                        'error': str(exc),
+                    },
+                )
+                PaymentEvent.objects.create(
+                    payment=payment,
+                    event_type=PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
+                    payload={'error': str(exc), 'phase': 'reconcile'},
+                    note='Реконсиляция: подтверждение заказа не удалось.',
+                )
+                return 'confirm_failed'
+
+        if order_status == OrderStatus.CANCELLED:
+            PaymentService.record_refund_failure(
+                payment,
+                reason='Заказ отменён после оплаты — требуется возврат.',
+                error='order_cancelled_after_payment',
+                user_id=None,
+            )
+            return 'refund_required'
+
+        return 'ok'
 
     # ==============================================================
     # ОБРАБОТКА ВЕБХУКА
