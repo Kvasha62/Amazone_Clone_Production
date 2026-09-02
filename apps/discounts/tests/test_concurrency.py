@@ -1,12 +1,12 @@
-from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
-from threading import Barrier
+from functools import partial
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, connections, transaction
 from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 from rest_framework.exceptions import ValidationError
 
+from apps.core.tests.concurrency import ConcurrentJobsMixin
 from apps.discounts.models import CouponUsage
 from apps.discounts.tests.factories import create_test_coupon
 from apps.orders.models import Order
@@ -18,7 +18,17 @@ User = get_user_model()
 
 
 @skipUnlessDBFeature('has_select_for_update')
-class CouponConcurrencyTests(TransactionTestCase):
+class CouponConcurrencyTests(ConcurrentJobsMixin, TransactionTestCase):
+    """Cross-connection тесты купонов.
+
+    PROD-015: запуск идёт через bounded-раннер
+    apps.core.tests.concurrency (daemon-потоки + join по ОБЩЕМУ
+    дедлайну). Прежний `with ThreadPoolExecutor(...)` ограничивал
+    только `future.result(timeout=30)`, а выход из контекст-менеджера
+    вызывал shutdown(wait=True) и мог ждать зависший воркер
+    бесконечно. Теперь зависание = детерминированный fail со стеком.
+    """
+
     reset_sequences = True
 
     def _apply(self, order_id, user_id, code, barrier):
@@ -36,13 +46,11 @@ class CouponConcurrencyTests(TransactionTestCase):
             connections.close_all()
 
     def _run_two(self, orders, users, code):
-        barrier = Barrier(2)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [
-                executor.submit(self._apply, order.pk, user.pk, code, barrier)
-                for order, user in zip(orders, users)
-            ]
-            return [future.result(timeout=30) for future in futures]
+        jobs = [
+            partial(self._apply, order.pk, user.pk, code)
+            for order, user in zip(orders, users)
+        ]
+        return self._run_jobs(jobs)
 
     def test_last_global_slot_allows_exactly_one_apply(self):
         coupon = create_test_coupon(
@@ -148,11 +156,10 @@ class CouponConcurrencyTests(TransactionTestCase):
         finally:
             connections.close_all()
 
-    def _run_jobs(self, jobs):
-        barrier = Barrier(len(jobs))
-        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-            futures = [executor.submit(fn, barrier) for fn in jobs]
-            return [future.result(timeout=30) for future in futures]
+    def _run_jobs(self, jobs, timeout=30):
+        """Ограниченный по времени запуск job'ов, принимающих barrier."""
+        run = self.run_concurrent_jobs(jobs, timeout=timeout, pass_barrier=True)
+        return run.results
 
     def test_apply_vs_remove_same_order_ends_consistent(self):
         """Гонка apply/remove на одном заказе сериализуется lock'ом Order.

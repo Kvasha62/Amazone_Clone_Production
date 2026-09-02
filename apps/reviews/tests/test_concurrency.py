@@ -6,7 +6,9 @@
 #
 # Эти тесты — РЕАЛЬНЫЕ cross-connection тесты на PostgreSQL:
 #   • TransactionTestCase (данные коммитятся, видны из других сессий);
-#   • ThreadPoolExecutor / threading + Barrier для одновременного старта;
+#   • bounded-раннер apps.core.tests.concurrency (daemon-потоки +
+#     Barrier для одновременного старта + join по общему дедлайну:
+#     зависший воркер даёт fail, а не бесконечное ожидание — PROD-015);
 #   • каждый поток работает на СОБСТВЕННОМ DB-соединении и закрывает
 #     его в finally (иначе сессии держат test DB и teardown падает
 #     с «database is being accessed by other users» — приём из
@@ -28,9 +30,7 @@
 # ────────────────────────────────────────────────────────────────────────
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
-from threading import Barrier
 
 from django.contrib.auth import get_user_model
 from django.db import connections, transaction
@@ -39,6 +39,7 @@ from django.test import TransactionTestCase, skipUnlessDBFeature
 
 from apps.catalog.constants import ProductStatus
 from apps.catalog.models import Brand, Category, Product
+from apps.core.tests.concurrency import ConcurrentJobsMixin
 from apps.orders.tests.factories import create_test_user
 from apps.reviews.models import Review
 from apps.reviews.services.review_service import ReviewService
@@ -79,7 +80,7 @@ def expected_aggregate_stats(product):
 
 
 @skipUnlessDBFeature('has_select_for_update')
-class ReviewAggregateConcurrencyTests(TransactionTestCase):
+class ReviewAggregateConcurrencyTests(ConcurrentJobsMixin, TransactionTestCase):
     """
     ARCH-001 H1: конкурентная стратегия review-aggregate paths.
 
@@ -102,30 +103,17 @@ class ReviewAggregateConcurrencyTests(TransactionTestCase):
         """
         Запускает функции одновременно (барьер старта). Каждый поток
         закрывает свои соединения в finally. Возвращает список
-        результатов; исключения пробрасываются после join'а —
-        конкурентные операции не должны падать.
+        результатов.
+
+        PROD-015: ожидание ОГРАНИЧЕНО общим дедлайном (daemon-потоки +
+        join по дедлайну). Ранее здесь использовался
+        `with ThreadPoolExecutor(...)`: `future.result(timeout=...)`
+        ограничивал только локальное ожидание, а выход из `with` звал
+        shutdown(wait=True) и мог ждать зависший воркер бесконечно.
+        Теперь зависание — детерминированный fail со стеком потока.
         """
-        barrier = Barrier(len(jobs))
-        errors = []
-        results = []
-
-        def runner(fn):
-            try:
-                connections.close_all()
-                barrier.wait(timeout=10)
-                results.append(fn())
-            except Exception as exc:  # noqa: BLE001 — собираем для assert
-                errors.append(exc)
-            finally:
-                connections.close_all()
-
-        with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
-            futures = [executor.submit(runner, fn) for fn in jobs]
-            for future in futures:
-                future.result(timeout=timeout)
-
-        self.assertEqual(errors, [], f'Ошибки в конкурентных потоках: {errors!r}')
-        return results
+        run = self.run_concurrent_jobs(jobs, timeout=timeout)
+        return run.results
 
     def _assert_invariant(self, product=None):
         """

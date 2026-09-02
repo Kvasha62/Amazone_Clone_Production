@@ -27,6 +27,7 @@ from django.test.runner import DiscoverRunner
 # не пытался найти случайные директории-опечатки (tasts и т.п.).
 TEST_APP_LABELS = [
     'config.tests',
+    'apps.core.tests',
     'apps.users.tests',
     'apps.catalog.tests',
     'apps.pricing.tests',
