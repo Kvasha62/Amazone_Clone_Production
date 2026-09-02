@@ -10,6 +10,7 @@ new design or change application behavior.
 - [ADR-002 — Reject Cross-Domain ProductVariant Signals](ADR-002-reject-cross-domain-product-variant-signals.md)
 - [ADR-003 — Pricing and Review Concurrency Consistency](ADR-003-pricing-and-review-concurrency-consistency.md)
 - [ADR-004 — Authenticate and Idempotently Process Payment Webhooks](ADR-004-secure-idempotent-payment-webhooks.md)
+- [ADR-005 — Allocate Order Numbers from a PostgreSQL Sequence](ADR-005-order-number-allocation-sequence.md)
 
 ## Naming
 

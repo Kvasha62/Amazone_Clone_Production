@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 
-from django.db import models, transaction
+from django.db import transaction
 from django.utils import timezone
 
 from rest_framework.exceptions import NotFound, ValidationError
@@ -157,50 +157,28 @@ class OrderService:
             total_weight += variant_weight * cart_item.quantity
         weight_kg = total_weight if total_weight > 0 else None
 
-        from django.db import IntegrityError
-        from apps.orders.constants import ORDER_NUMBER_PREFIX, ORDER_NUMBER_DIGITS
-
-        order = None
-        for _attempt in range(3):
-            max_seq = Order.objects.aggregate(
-                max_seq=models.Max('_order_number_seq'),
-            )['max_seq'] or 0
-            next_seq = max_seq + 1
-
-            order = Order(
-                user=user,
-                cart=cart,
-                status=OrderStatus.PENDING,
-                _order_number_seq=next_seq,
-                recipient_name=address.recipient_name,
-                country=address.country,
-                region=address.region,
-                city=address.city,
-                street=address.street,
-                postal_code=address.postal_code,
-                subtotal=Decimal('0.00'),
-                # F-08: доставка проставляется ниже серверным расчётом.
-                delivery_cost=Decimal('0.00'),
-                discount=Decimal('0.00'),
-                total=Decimal('0.00'),
-                notes=notes,
-            )
-            order.order_number = (
-                f'{ORDER_NUMBER_PREFIX}-{next_seq:0{ORDER_NUMBER_DIGITS}d}'
-            )
-            try:
-                order.save()
-                break
-            except IntegrityError:
-                logger.warning(
-                    'order_number_collision_retry',
-                    extra={'attempt': _attempt + 1, 'next_seq': next_seq},
-                )
-                continue
-        else:
-            raise ValidationError({
-                'detail': 'Не удалось создать номер заказа. Попробуйте снова.',
-            })
+        # F-13 / PROD-010: номер заказа выдаёт Order.save() через
+        # PostgreSQL SEQUENCE (nextval) — атомарно на стороне СУБД, поэтому
+        # здесь нет ни чтения MAX(), ни retry на IntegrityError: параллельные
+        # оформления не могут получить один order_number.
+        order = Order(
+            user=user,
+            cart=cart,
+            status=OrderStatus.PENDING,
+            recipient_name=address.recipient_name,
+            country=address.country,
+            region=address.region,
+            city=address.city,
+            street=address.street,
+            postal_code=address.postal_code,
+            subtotal=Decimal('0.00'),
+            # F-08: доставка проставляется ниже серверным расчётом.
+            delivery_cost=Decimal('0.00'),
+            discount=Decimal('0.00'),
+            total=Decimal('0.00'),
+            notes=notes,
+        )
+        order.save()
 
         order_items_bulk = []
         for cart_item in valid_items:
