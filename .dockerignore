@@ -34,9 +34,19 @@ frontend/.cache/
 
 # Медиа (примонтируем через volume)
 uploads/
+media/
+staticfiles/
 
 # SQLite (используем PostgreSQL в Docker)
 db.sqlite3
+db.sqlite3-journal
 
-# Окружение
+# Окружение — СЕКРЕТЫ НИКОГДА не попадают в образ (PROD-008 / F-12)
 .env
+.env.*
+
+# Docker
+docker-compose*.yml
+
+# CI
+.github/

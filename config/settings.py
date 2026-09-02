@@ -372,9 +372,34 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = "static/"
+# PROD-008 (architect review, BLOCKER 2): STATIC_URL — корневой абсолютный
+# путь "/static/": в production static генерируется и раздаётся nginx'ом
+# именно с этого префикса (location /static/). Относительное "static/"
+# порождало бы относительные URL (static/admin/... вместо /static/admin/...)
+# при обращении к вложенным путям. Django docs: STATIC_URL должен включать
+# ведущий "/" (кроме случая CDN-домена).
+STATIC_URL = "/static/"
+
+# PROD-008 / F-12: целевой каталог `collectstatic` (production).
+# Совпадает с контейнером `/app/staticfiles` в Dockerfile.backend.prod и
+# docker-compose.prod.yml (volume static_data) и исключён из git
+# (`.gitignore: staticfiles/`). В DEV не используется.
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+
 MEDIA_URL = "/media/"
+# PROD-008 / F-12: единый путь медиа-файлов для dev и production.
+# В контейнере — `/app/media` (volume media_data в docker-compose.prod.yml;
+# volume media в docker-compose.yml). Ранее dev-compose монтировал volume
+# в /app/uploads, что не совпадало с MEDIA_ROOT — исправлено (Issue #15, §6).
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
+
+# PROD-008 / F-12: доверенные origin для Django admin за https-прокси
+# (nginx/LB). Опционально: пусто по умолчанию, явные значения в .env.
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+]
 
 # ==========================================================
 # 🔴 CORS — React Frontend Support
