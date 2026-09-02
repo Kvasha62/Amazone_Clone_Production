@@ -53,6 +53,7 @@ jobs:
       DB_PORT: 5432
       DJANGO_SECRET_KEY: ci-insecure-key-do-not-use-in-production
       DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1"
 
     steps:
       - name: Checkout repository
