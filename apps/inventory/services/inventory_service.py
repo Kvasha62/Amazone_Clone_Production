@@ -92,7 +92,8 @@ class InventoryService:
         Идемпотентно применяет недостающие операции по статусу заказа:
           • CONFIRMED / PROCESSING / SHIPPED без RESERVE → reserve_stock();
           • CANCELLED с непарными RESERVE → release_stock();
-          • DELIVERED с непарными RESERVE → commit_stock().
+          • DELIVERED — если RESERVE потерян (сбой до резервирования),
+            сначала reserve_stock(), затем commit_stock() (списание).
         Каждая операция сама по себе идемпотентна (movement-pairing),
         поэтому повторный запуск безопасен. Возвращает отчёт
         {'order_id', 'order_status', 'actions'}.
@@ -116,6 +117,16 @@ class InventoryService:
                 actions.append('released')
 
         elif status == OrderStatus.DELIVERED:
+            # PROD-003: у DELIVERED-заказа мог не сохраниться RESERVE
+            # (сбой между переходом статуса и резервированием). Сначала
+            # восстанавливаем резерв, затем списываем — иначе списание
+            # было бы no-op и сток остался бы несниженным.
+            has_reserve = StockMovement.objects.filter(
+                order=locked,
+                kind=MovementKind.RESERVE,
+            ).exists()
+            if not has_reserve:
+                InventoryService.reserve_stock(locked)
             if InventoryService.commit_stock(locked):
                 actions.append('committed')
 
@@ -287,17 +298,26 @@ class InventoryService:
         InventoryService._locked_order(order)
 
         # PROD-003: обрабатываем только RESERVE-движения, у которых ещё
-        # НЕТ парного RELEASE. Повторный/конкурентный вызов — no-op:
-        # повторный decrement reserved_quantity невозможен.
+        # НЕТ парного RELEASE и НЕТ парного OUT. Повторный/конкурентный
+        # вызов — no-op: повторный decrement reserved_quantity невозможен.
+        # OUT-исключение закрывает гонку release↔commit: если commit
+        # победил, release уже ничего не должен освобождать (иначе
+        # reserved ушёл бы в минус и нарушился CHECK-инвариант).
         released_reserve_ids = StockMovement.objects.filter(
             order=order,
             kind=MovementKind.RELEASE,
+            related_movement__isnull=False,
+        ).values('related_movement_id')
+        committed_reserve_ids = StockMovement.objects.filter(
+            order=order,
+            kind=MovementKind.OUT,
             related_movement__isnull=False,
         ).values('related_movement_id')
         reserve_movements = (
             StockMovement.objects
             .filter(order=order, kind=MovementKind.RESERVE)
             .exclude(pk__in=released_reserve_ids)
+            .exclude(pk__in=committed_reserve_ids)
             .select_related('stock')
         )
 

@@ -15,15 +15,17 @@
 # каждый поток закрывает свои соединения в finally).
 # ────────────────────────────────────────────────────────────────────────
 
+import importlib.util
 import threading
 from decimal import Decimal
 
 from django.db import connections
-from django.test import TransactionTestCase, skipUnlessDBFeature
+from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 
 from apps.catalog.constants import ProductStatus
 from apps.catalog.models import Brand, Category, Product, ProductVariant
 from apps.inventory.models import Stock, StockMovement
+from apps.inventory.models.stock_movement import MovementKind
 from apps.inventory.services.inventory_service import InventoryService
 from apps.orders.models import Order, OrderItem
 from apps.orders.models.order import OrderStatus
@@ -134,6 +136,29 @@ class InventoryIdempotencyTests(TransactionTestCase):
             StockMovement.objects.filter(
                 order=order,
                 kind='out',
+            ).exists(),
+        )
+
+    def test_release_after_commit_is_noop(self):
+        """Списанный резерв не может быть освобождён повторно.
+
+        (N-01: канонический release_stock исключает RESERVE, уже парные
+        OUT. Без этого release повторно уменьшил бы reserved_quantity
+        и нарушил CHECK-инвариант PositiveIntegerField.)
+        """
+        order, variant = _make_order_with_item(quantity=5)
+        InventoryService.reserve_stock(order)
+        InventoryService.commit_stock(order)
+
+        movements = InventoryService.release_stock(order)
+        self.assertEqual(movements, [])
+        stock = Stock.objects.get(variant=variant)
+        self.assertEqual(stock.quantity, 95)  # списание сохранено
+        self.assertEqual(stock.reserved_quantity, 0)  # не ушло в минус
+        self.assertFalse(
+            StockMovement.objects.filter(
+                order=order,
+                kind='release',
             ).exists(),
         )
 
@@ -313,6 +338,37 @@ class InventoryReconcileOrderTests(TransactionTestCase):
         stock = Stock.objects.get(variant=variant)
         self.assertEqual(stock.reserved_quantity, 5)
 
+    def test_reconcile_delivered_without_reserve_commits_stock(self):
+        """DELIVERED без RESERVE: recovery резервирует, затем списывает.
+
+        (N-01: поведение, ранее жившее в monkey-patch'е, теперь
+        каноническое — пара RESERVE→OUT создаётся корректно.)
+        """
+        order, variant = _make_order_with_item(quantity=5)
+        # Заказ доставлен, но резервирование/списание потеряны (сбой).
+        Order.objects.filter(pk=order.pk).update(
+            status=OrderStatus.DELIVERED,
+        )
+
+        report = InventoryService.reconcile_order(order)
+        self.assertEqual(report['actions'], ['committed'])
+
+        stock = Stock.objects.get(variant=variant)
+        self.assertEqual(stock.quantity, 95)
+        self.assertEqual(stock.reserved_quantity, 0)
+        self.assertEqual(
+            StockMovement.objects.filter(
+                order=order, kind='reserve',
+            ).count(),
+            1,
+        )
+        out_movement = StockMovement.objects.get(order=order, kind='out')
+        self.assertEqual(
+            out_movement.related_movement.kind,
+            MovementKind.RESERVE,
+            'OUT должен ссылаться на восстановленный RESERVE',
+        )
+
     def test_reconcile_repeated_is_safe(self):
         order, variant = _make_order_with_item(quantity=5)
         Order.objects.filter(pk=order.pk).update(
@@ -323,3 +379,49 @@ class InventoryReconcileOrderTests(TransactionTestCase):
         self.assertEqual(second['actions'], [])
         stock = Stock.objects.get(variant=variant)
         self.assertEqual(stock.quantity, 95)
+
+
+class InventoryServiceCanonicalImplementationTests(TestCase):
+    """N-01: все операции живут в каноническом InventoryService.
+
+    Тесты-сторожа доказывают, что (а) методы release_stock /
+    reconcile_order / reserve_stock / commit_stock не подменены в
+    runtime (реализация из apps/inventory/services/inventory_service.py)
+    и (б) модуль monkey-patch'а не существует. Поведенческие тесты
+    выше и ниже в этом файле исполняют именно канонические методы.
+    """
+
+    _CANONICAL_PATH = 'apps/inventory/services/inventory_service.py'
+    _GUARDED_METHODS = (
+        'reserve_stock',
+        'release_stock',
+        'commit_stock',
+        'reconcile_order',
+    )
+
+    def test_inventory_operations_are_canonical_methods(self):
+        import inspect
+
+        for name in self._GUARDED_METHODS:
+            raw = InventoryService.__dict__[name]
+            func = raw.__func__ if isinstance(raw, staticmethod) else raw
+            # Разворачиваем декораторы (@transaction.atomic и пр.) —
+            # финальная реализация обязана жить в каноническом модуле.
+            real = inspect.unwrap(func)
+            self.assertTrue(
+                real.__code__.co_filename.endswith(self._CANONICAL_PATH),
+                (
+                    f'InventoryService.{name} подменён в runtime: '
+                    f'{real.__code__.co_filename}:'
+                    f'{real.__code__.co_firstlineno}'
+                ),
+            )
+
+    def test_monkey_patch_module_does_not_exist(self):
+        spec = importlib.util.find_spec(
+            'apps.inventory.services.prod003_ci_fixes',
+        )
+        self.assertIsNone(
+            spec,
+            'Модуль runtime-подмены prod003_ci_fixes должен быть удалён',
+        )

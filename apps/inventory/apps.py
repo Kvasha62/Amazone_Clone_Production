@@ -38,4 +38,3 @@ class InventoryConfig(AppConfig):
         📖 https://docs.djangoproject.com/en/stable/ref/applications/#django.apps.AppConfig.ready
         """
         import apps.inventory.signals  # noqa: F401
-        import apps.inventory.services.prod003_ci_fixes  # noqa: F401
