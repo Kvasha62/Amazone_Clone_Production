@@ -19,6 +19,7 @@ from django.test import TestCase
 from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.orders.tests.factories import create_test_order, create_test_user
+from apps.shipping.constants import MAX_SHIPPING_COST
 from apps.shipping.models import Shipment, ShippingMethod, ShippingZone
 from apps.shipping.services.shipping_service import ShippingService
 from apps.shipping.tests.factories import (
@@ -129,6 +130,146 @@ class CalculateShippingCostTests(TestCase):
         self.assertIsNone(result['zone'])
         # Нет зоны → нет фильтра → все активные методы
         self.assertEqual(len(result['methods']), 2)
+
+
+# ================================================================
+# Авторитетная цена доставки для заказа (F-08 / PROD-006)
+# ================================================================
+
+class CalculateOrderDeliveryCostTests(TestCase):
+    """Тесты ShippingService.calculate_order_delivery_cost().
+
+    Единственный серверный путь, которым checkout получает
+    Order.delivery_cost: только доменные данные, ничего из запроса.
+    """
+
+    def setUp(self):
+        self.zone = create_test_zone(
+            name='Москва и МО',
+            zone_code='msk',
+            regions=['Москва', 'Московская область'],
+        )
+        self.method = create_test_method(
+            zone=self.zone,
+            name='Курьер',
+            base_price=Decimal('300.00'),
+            price_per_kg=Decimal('50.000'),
+            free_shipping_threshold=Decimal('5000.00'),
+            sort_order=10,
+        )
+
+    def test_cost_from_method_tariff(self):
+        """База + вес, порог бесплатной доставки не достигнут."""
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            city='Москва',
+            weight_kg=Decimal('2.00'),
+        )
+        # 300 + 50 × 2 = 400
+        self.assertEqual(cost, Decimal('400.00'))
+
+    def test_zone_resolved_by_region(self):
+        """Зона определяется по региону адреса."""
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            region='Московская область',
+        )
+        self.assertEqual(cost, Decimal('300.00'))
+
+    def test_free_shipping_threshold(self):
+        """Сумма ≥ порога → бесплатная доставка."""
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('5000.00'),
+            city='Москва',
+        )
+        self.assertEqual(cost, Decimal('0.00'))
+
+    def test_no_zone_returns_zero(self):
+        """Зона не определена → NO_DELIVERY_CHARGE (серверная константа)."""
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            city='Неизвестный город',
+        )
+        self.assertEqual(cost, Decimal('0.00'))
+
+    def test_no_address_data_returns_zero(self):
+        """Без региона и города тариф не подбирается."""
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+        )
+        self.assertEqual(cost, Decimal('0.00'))
+
+    def test_inactive_method_ignored(self):
+        """Неактивный способ доставки не участвует в расчёте."""
+        self.method.is_active = False
+        self.method.save(update_fields=['is_active', 'updated_at'])
+
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            city='Москва',
+        )
+        self.assertEqual(cost, Decimal('0.00'))
+
+    def test_primary_method_selected_by_sort_order(self):
+        """Берётся основной способ зоны (Meta.ordering: sort_order, base_price)."""
+        create_test_method(
+            zone=self.zone,
+            name='Самовывоз',
+            base_price=Decimal('99.00'),
+            price_per_kg=Decimal('0.000'),
+            free_shipping_threshold=None,
+            sort_order=5,
+        )
+
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            city='Москва',
+        )
+        self.assertEqual(cost, Decimal('99.00'))
+
+    def test_cost_capped_by_max_shipping_cost(self):
+        """Опечатка в тарифе не даёт цене превысить MAX_SHIPPING_COST."""
+        self.method.base_price = MAX_SHIPPING_COST + Decimal('5000.00')
+        self.method.free_shipping_threshold = None
+        self.method.max_shipping_cost = None
+        self.method.save(update_fields=[
+            'base_price',
+            'free_shipping_threshold',
+            'max_shipping_cost',
+            'updated_at',
+        ])
+
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            city='Москва',
+        )
+        self.assertEqual(cost, MAX_SHIPPING_COST)
+
+    def test_shipping_type_filter(self):
+        """Фильтр по типу доставки ограничивает выбор способа."""
+        create_test_method(
+            zone=self.zone,
+            name='Самовывоз',
+            shipping_type='pickup',
+            base_price=Decimal('99.00'),
+            price_per_kg=Decimal('0.000'),
+            free_shipping_threshold=None,
+            sort_order=5,
+        )
+
+        cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            city='Москва',
+            shipping_type='pickup',
+        )
+        self.assertEqual(cost, Decimal('99.00'))
+
+        courier_cost = ShippingService.calculate_order_delivery_cost(
+            order_total=Decimal('1000.00'),
+            city='Москва',
+            shipping_type='courier',
+        )
+        self.assertEqual(courier_cost, Decimal('300.00'))
 
 
 # ================================================================

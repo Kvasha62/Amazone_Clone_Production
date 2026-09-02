@@ -10,11 +10,18 @@
 #     2. select_for_update() — пессимистичная блокировка строк
 #
 # ОПЕРАЦИИ:
-#   calculate_shipping_cost()  — рассчитать стоимость доставки
-#   get_available_methods()    — доступные способы для заказа
-#   create_shipment()          — создать отправление для заказа
-#   update_tracking()          — обновить трек-номер
-#   transition_status()        — перевести отправление в новый статус
+#   calculate_shipping_cost()      — рассчитать стоимость доставки
+#   calculate_order_delivery_cost()— ЕДИНСТВЕННЫЙ серверный расчёт цены
+#                                    доставки для оформления заказа (F-08)
+#   get_available_methods()        — доступные способы для заказа
+#   create_shipment()              — создать отправление для заказа
+#   update_tracking()              — обновить трек-номер
+#   transition_status()            — перевести отправление в новый статус
+#
+# ГРАНИЦА ДОВЕРИЯ (F-08 / PROD-006):
+#   Цена доставки — денежное бизнес-правило. Она вычисляется ТОЛЬКО из
+#   серверных данных (ShippingZone / ShippingMethod / адрес заказа) и
+#   никогда не принимается из тела запроса.
 #
 # 📖 Про Service Layer: https://martinfowler.com/eaaCatalog/serviceLayer.html
 # 📖 Про select_for_update: https://docs.djangoproject.com/en/stable/ref/models/querysets/#select-for-update
@@ -38,6 +45,7 @@ from rest_framework.exceptions import NotFound, ValidationError
 from apps.orders.models.order import OrderStatus
 from apps.shipping.constants import (
     MAX_SHIPPING_COST,
+    NO_DELIVERY_CHARGE,
     SHIPMENT_IN_TRANSIT,
     SHIPMENT_PREPARING,
     SHIPMENT_STATUS_TRANSITIONS,
@@ -133,6 +141,114 @@ class ShippingService:
             'zone': zone,
             'methods': results,
         }
+
+    # ==============================================================
+    # ЕДИНСТВЕННЫЙ СЕРВЕРНЫЙ РАСЧЁТ ЦЕНЫ ДОСТАВКИ ДЛЯ ЗАКАЗА (F-08)
+    # ==============================================================
+
+    @staticmethod
+    def calculate_order_delivery_cost(
+        *,
+        order_total: Decimal,
+        region: str | None = None,
+        city: str | None = None,
+        weight_kg: Decimal | None = None,
+        shipping_type: str | None = None,
+    ) -> Decimal:
+        """Возвращает авторитетную цену доставки для оформления заказа.
+
+        F-08 / PROD-006: это ЕДИНСТВЕННЫЙ путь, которым checkout получает
+        ``Order.delivery_cost``. Все входные данные — серверные:
+        сумма заказа, регион/город из сохранённого адреса, вес вариантов
+        из каталога и тарифы ``ShippingMethod`` из БД. Денежная сумма из
+        запроса клиента сюда не попадает ни в каком виде.
+
+        АЛГОРИТМ:
+          1. Зона определяется по ``region``, затем по ``city``
+             (``ShippingZone.regions`` — серверные данные).
+          2. Берётся основной активный способ доставки зоны — первый по
+             доменному порядку ``ShippingMethod.Meta.ordering``
+             (``sort_order``, затем ``base_price``).
+          3. Стоимость считает доменная формула
+             ``ShippingMethod.calculate_cost(order_total, weight_kg)``
+             (порог бесплатной доставки, цена за кг, cap тарифа).
+          4. Итог дополнительно ограничен доменным ``MAX_SHIPPING_COST``.
+
+        Если зона не определена или в зоне нет активного способа —
+        доставка бесплатна (``Decimal('0.00')``): тарифов для адреса нет,
+        значит и платить клиенту не за что. Это же сохраняет прежнее
+        поведение checkout, когда тарифы доставки не настроены.
+
+        ARGS:
+            order_total: сумма заказа (subtotal) — база для порога
+                         бесплатной доставки
+            region: регион из адреса доставки
+            city: город из адреса доставки (fallback для определения зоны)
+            weight_kg: суммарный вес позиций заказа
+            shipping_type: фильтр по типу доставки (опционально)
+
+        RETURNS:
+            Decimal('0.01') — цена доставки, 2 знака после запятой
+        """
+        zone = ShippingService._resolve_zone(region=region)
+        if zone is None and city:
+            zone = ShippingService._resolve_zone(region=city)
+
+        if zone is None:
+            logger.info(
+                'delivery_cost_zone_not_resolved',
+                extra={
+                    'region': region,
+                    'city': city,
+                    'delivery_cost': str(NO_DELIVERY_CHARGE),
+                },
+            )
+            return NO_DELIVERY_CHARGE
+
+        methods_qs = ShippingMethod.objects.active().for_zone(zone)
+        if shipping_type:
+            methods_qs = methods_qs.by_type(shipping_type)
+
+        # first() учитывает Meta.ordering → «основной» способ зоны.
+        method = methods_qs.first()
+        if method is None:
+            logger.info(
+                'delivery_cost_no_active_method',
+                extra={
+                    'zone_code': zone.zone_code,
+                    'shipping_type': shipping_type,
+                    'delivery_cost': str(NO_DELIVERY_CHARGE),
+                },
+            )
+            return NO_DELIVERY_CHARGE
+
+        cost = method.calculate_cost(order_total, weight_kg)
+
+        # Доменный cap (защита от опечатки в тарифе) — как в create_shipment.
+        if cost > MAX_SHIPPING_COST:
+            logger.warning(
+                'delivery_cost_capped',
+                extra={
+                    'shipping_method_id': method.pk,
+                    'raw_cost': str(cost),
+                    'max_shipping_cost': str(MAX_SHIPPING_COST),
+                },
+            )
+            cost = MAX_SHIPPING_COST
+
+        delivery_cost = cost.quantize(Decimal('0.01'))
+
+        logger.info(
+            'delivery_cost_calculated',
+            extra={
+                'zone_code': zone.zone_code,
+                'shipping_method_id': method.pk,
+                'order_total': str(order_total),
+                'weight_kg': str(weight_kg),
+                'delivery_cost': str(delivery_cost),
+            },
+        )
+        return delivery_cost
 
     # ==============================================================
     # СПИСОК ДОСТУПНЫХ СПОСОБОВ ДОСТАВКИ

@@ -202,6 +202,7 @@ class OrderListView(_OrderViewMixin, APIView):
           1. Валидация body (CreateOrderInputSerializer)
           2. Получение/создание корзины
           3. OrderService.create_from_cart() — бизнес-логика
+             (цену доставки считает сервер, не клиент)
           4. Сериализация и ответ (201 CREATED)
 
         ОШИБКИ:
@@ -209,6 +210,8 @@ class OrderListView(_OrderViewMixin, APIView):
           • Пустая корзина → 400
           • Нет адреса → 400
           • Сумма < MIN_ORDER_TOTAL → 400
+          • delivery_cost в теле → 400 (F-08: поле больше не поддерживается,
+            цена доставки вычисляется на сервере)
         """
         input_serializer = CreateOrderInputSerializer(data=request.data)
         input_serializer.is_valid(raise_exception=True)
@@ -217,12 +220,12 @@ class OrderListView(_OrderViewMixin, APIView):
         cart = CartService.get_or_create_cart(request)
 
         # Создаём заказ через сервис.
+        # F-08: доставка сюда НЕ передаётся — цену доставки считает сервер
+        # (ShippingService.calculate_order_delivery_cost), поэтому подменить
+        # её через тело запроса невозможно.
         order = OrderService.create_from_cart(
             user=request.user,
             cart=cart,
-            delivery_cost=input_serializer.validated_data.get(
-                'delivery_cost', 0,
-            ),
             notes=input_serializer.validated_data.get('notes', ''),
         )
 

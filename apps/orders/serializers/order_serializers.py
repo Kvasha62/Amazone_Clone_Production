@@ -27,7 +27,7 @@
 #   • Все API endpoints заказов → ImportError (500)
 # ────────────────────────────────────────────────────────────────────────
 
-from decimal import Decimal
+from collections.abc import Mapping
 
 from rest_framework import serializers
 
@@ -39,35 +39,52 @@ from apps.orders.models.order import OrderStatus
 # INPUT-СЕРИАЛИЗАТОРЫ (валидация запросов)
 # ==============================================================
 
+def _mapping_payloads(initial_data):
+    """Возвращает mapping-payload'ы из ``Serializer.initial_data``.
+
+    ФОРМА ``request.data`` ЗАВИСИТ ОТ ПАРСЕРА DRF:
+      • JSONRenderer/JSONParser                → обычный ``dict``
+      • FormParser (application/x-www-form-urlencoded) → ``QueryDict``
+      • MultiPartParser (multipart/form-data)  → ``QueryDict``
+
+    Поэтому проверка идёт по ``collections.abc.Mapping``, а не по
+    конкретному ``dict``: так она одинаково работает для JSON dict,
+    Django ``QueryDict`` и любого другого mapping-like объекта, который
+    может отдать парсер.
+
+    Немappping-вход (строка, число, список) возвращает пустой кортеж —
+    ложных срабатываний нет; такой вход DRF отклоняет ещё до ``validate()``
+    в ``to_internal_value()`` («Invalid data. Expected a dictionary…»),
+    поэтому до расчёта заказа он не доходит в любом случае.
+    """
+    if isinstance(initial_data, Mapping):
+        return (initial_data,)
+    return ()
+
+
 class CreateOrderInputSerializer(serializers.Serializer):
     """
     Валидация тела POST /api/v1/orders/.
 
     ФОРМАТ ЗАПРОСА:
         {
-            "delivery_cost": 300.00,   // опционально, по умолчанию 0
             "notes": "Позвонить перед доставкой"  // опционально
         }
 
+    ЦЕНА ДОСТАВКИ — СЕРВЕРНАЯ (F-08 / PROD-006):
+        ``delivery_cost`` НЕ является полем запроса и не участвует в расчёте
+        заказа. Авторитетную стоимость доставки считает сервер
+        (``ShippingService.calculate_order_delivery_cost`` →
+        ``OrderService.create_from_cart``) из адреса доставки, суммы заказа
+        и тарифов ``ShippingMethod``. Явно переданное значение отклоняется
+        с 400 — см. ``validate()``.
+
     ПОЧЕМУ Serializer, А НЕ ModelSerializer:
         Входные данные не мапятся 1:1 на модель Order:
-        • delivery_cost — опционально (default=0)
         • notes — опционально
         ModelSerializer попытался бы создать Order напрямую —
         а это делает OrderService.create_from_cart().
     """
-
-    # delivery_cost — стоимость доставки. Опциональное поле.
-    # default=Decimal('0.00') — если не передано → бесплатная доставка.
-    # min_value=0 — доставка не может стоить отрицательно.
-    # max_digits=10, decimal_places=2 — до 99 999 999.99₽.
-    delivery_cost = serializers.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        min_value=Decimal('0'),
-        default=Decimal('0.00'),
-        required=False,
-    )
 
     # notes — комментарий к заказу. Опционально.
     # max_length=1000 — защита от огромных текстов.
@@ -77,6 +94,29 @@ class CreateOrderInputSerializer(serializers.Serializer):
         default='',
         allow_blank=True,
     )
+
+    def validate(self, attrs):
+        """F-08: явный ``delivery_cost`` в теле запроса отклоняется.
+
+        Стоимость доставки — денежное бизнес-правило, поэтому она не
+        принимается от клиента. По умолчанию DRF молча игнорирует
+        неизвестные поля; здесь неизвестное денежное поле отклоняется явно,
+        чтобы подделка цены доставки была видна клиенту как ошибка,
+        а не как «принятый» запрос.
+
+        Контракт должен работать для ЛЮБОГО поддерживаемого формата тела:
+        JSON (``dict``), form-encoded и multipart (``QueryDict``) —
+        см. ``_mapping_payloads()``.
+        """
+        for payload in _mapping_payloads(self.initial_data):
+            if 'delivery_cost' in payload:
+                raise serializers.ValidationError({
+                    'delivery_cost': (
+                        'Стоимость доставки рассчитывается на сервере и не '
+                        'принимается от клиента. Удалите поле delivery_cost.'
+                    ),
+                })
+        return attrs
 
 
 class OrderStatusTransitionSerializer(serializers.Serializer):
