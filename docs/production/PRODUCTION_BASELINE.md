@@ -48,15 +48,27 @@ No other change may modify the baseline record.
 | Field | Value |
 |---|---|
 | Ticket | PROD-003 — Make order↔inventory↔payment coordination fail-safe |
-| Pull request | #5 (`Kvasha62/Amazone_Clone_Production`) |
+| Pull request | #5 (`Kvasha62/Amazone_Clone_Production`) — OPEN, not merged |
 | Branch | `arena/01a05e31-amazone-clone-production` |
-| New baseline SHA (final code head of PR #5) | `df74d6a945fe813ad02a7818409173ef2df6b742` |
-| Commit title | `PROD-003: move inventory concurrency fixes into InventoryService (remove monkey-patch)` |
-| CI status on this SHA | ✅ green — check run `ci` `completed` / `success`, GitHub Actions run `33594177345` |
-| Test suite | `Ran 1159 tests in 120.694s — OK` (PostgreSQL 18.6, Python 3.13.15, Django 6.1); migrations check OK |
+| Final PR HEAD SHA | `3925846335683a2f20c66873d65cbafe7d57aca1` |
+| Final PR HEAD commit title | `PROD-003: fix baseline advance record to name the final code head with its CI run` |
+| CI on final PR HEAD | ✅ green — check run `ci` `completed` / `success`, GitHub Actions run `33594581351` |
+| New baseline SHA (last code-bearing commit of PR #5) | `df74d6a945fe813ad02a7818409173ef2df6b742` |
+| Baseline commit title | `PROD-003: move inventory concurrency fixes into InventoryService (remove monkey-patch)` |
+| CI on baseline SHA | ✅ green — check run `ci` `completed` / `success`, GitHub Actions run `33594177345` |
+| Test suite on baseline SHA | `Ran 1159 tests in 120.694s — OK` (PostgreSQL 18.6, Python 3.13.15, Django 6.1); migrations check OK |
 | Approved on | 2026-09-02 |
 
-Scope of PROD-003 (all in this PR, CI green on the head SHA):
+**Baseline semantics.** Per the rules above, the baseline fixes the last
+**code-bearing** commit of the PR: `df74d6a945fe813ad02a7818409173ef2df6b742`.
+The final PR HEAD `3925846335683a2f20c66873d65cbafe7d57aca1` is a docs-only
+certification commit on top of it (this record itself) and therefore is
+**not** the baseline SHA — it is recorded explicitly with its own commit
+title and its own green CI run, so «baseline SHA», «final PR HEAD» and CI
+never contradict each other. The advance takes effect when PR #5 is merged
+(PROD-003 is not merged yet).
+
+Scope of PROD-003 (all in this PR, CI green on the baseline SHA):
 
 - Fail-safe coordination `order ↔ inventory ↔ payment`:
   inventory transitions lock the `Order` row first and pair
@@ -79,9 +91,9 @@ Scope of PROD-003 (all in this PR, CI green on the head SHA):
 - management commands `retry_pending_refunds`,
   `reconcile_order_coordination`.
 
-`main` is not modified or merged by this ticket: it currently points at
+`main` is not modified or merged by this ticket: it remains at
 `3fff49f158cf2aa6f93fd5bf98053c60de57c4b2` and the PROD-000 record above
-remains the frozen reference for `main`; the advance recorded here takes
-effect when PR #5 is merged. This record is certified by a docs-only
-commit on top of the SHA named above; CI is green on both commits.
+stays the frozen reference for `main` until PR #5 is merged. CI is green
+on both the baseline SHA (`33594177345`) and the final PR HEAD
+(`33594581351`).
 
