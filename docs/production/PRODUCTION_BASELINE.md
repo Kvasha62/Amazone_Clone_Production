@@ -1,6 +1,133 @@
-# Production Baseline — PROD-013
+# Production Baseline — PROD-016
 
 ## Approved baseline commit
+
+| Field | Value |
+|---|---|
+| Repository | `Kvasha62/Amazone_Clone_Production` |
+| Branch | `main` |
+| Approved baseline SHA | `2a616450a107d7b7d53f39f5c3776baff1921515` |
+| Baseline commit title | `Merge pull request #30 from Kvasha62/arena/01a06362-amazone-clone-production` |
+| Baseline commit parents | `d7e383b3a5ba1a4550d0e059234a570918b5b44a` (`main` after PROD-014 / PR #28) and `76d9fc7b13ac2ccd2c54317ebd5319efe257bfa5` (final HEAD of PR #30) |
+| CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run #49 / ID `33671965689` (event `push`, branch `main`, attempt 1), job/check `ci` (ID `100387493188`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; `python manage.py check --fail-level WARNING` → `System check identified no issues (0 silenced).`; `python manage.py makemigrations --check --dry-run` → `No changes detected`; `python manage.py migrate --noinput` applied every migration `OK` (including `payments.0004_payment_external_id_unique`); `python manage.py test --verbosity 2` → `Found 1420 test(s).` / `Ran 1420 tests in 185.524s` / `OK` (PostgreSQL 18.6, Python 3.13.15, Django 6.1.1, psycopg 3.3.5); run started 2026-09-02T19:13:04Z, completed 2026-09-02T19:17:01Z |
+| Approved on | 2026-09-02 |
+| Ticket | PROD-016 |
+
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`2a616450a107d7b7d53f39f5c3776baff1921515` is the authoritative production
+state: it is the merge commit of completed PROD-015 (PR #30), and its
+first-parent history contains the merge commit of completed PROD-014 (PR #28,
+`d7e383b3a5ba1a4550d0e059234a570918b5b44a`) and the merge commit of the
+PROD-013 governance advance (PR #26, `b80568fc9d675c25cca4d53f89fa79902d6dc916`)
+on top of the previous baseline `1b4f069c159b198d30ee82a71b65198ce11bd2b7`.
+Earlier baseline records are preserved below as history.
+
+## Verification performed (read-only)
+
+1. GitHub `main` (REST API `branches/main`), `git ls-remote origin refs/heads/main`, local `main`, and `origin/main` all resolve to `2a616450a107d7b7d53f39f5c3776baff1921515` — an exact match with the new production baseline SHA (verified 2026-09-02).
+2. `main` is exactly 7 commits ahead of and 0 commits behind the previous baseline `1b4f069c159b198d30ee82a71b65198ce11bd2b7` (`compare/1b4f069c...2a616450`): `2cbabd81` + merge `b80568fc` (PROD-013 / PR #26, docs-only), `d8bb2cfc` + merge `d7e383b3` (PROD-014 / PR #28), `b8fa9533` + `76d9fc7b` + merge `2a616450` (PROD-015 / PR #30). Nothing else has landed on `main` since the previous baseline.
+3. GitHub Actions workflow `CI`, run #49 / ID `33671965689`: `head_sha` = `2a616450a107d7b7d53f39f5c3776baff1921515` (exact match), event `push`, branch `main`, `run_attempt` 1, status `completed`, conclusion `success`, started 2026-09-02T19:13:04Z, completed 2026-09-02T19:17:01Z; job `ci` (ID `100387493188`) is `completed` / `success`. It is the only check run registered on the baseline SHA.
+4. Every CI job step succeeded on the baseline SHA: `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks`, `Migration check`, `Apply migrations`, `Run tests`, and all post/cleanup steps concluded `success`. Job-log evidence: `System check identified no issues (0 silenced).`, `No changes detected`, every migration `... OK` (including `payments.0004_payment_external_id_unique`), `Found 1420 test(s).`, `Ran 1420 tests in 185.524s` / `OK`, `Destroying test database for alias 'default'`.
+5. PROD-014 / PR #28 is `MERGED` / completed (merged 2026-09-02T14:45:01Z by the Owner); its merge commit is exactly `d7e383b3a5ba1a4550d0e059234a570918b5b44a` (first parent of the baseline SHA). CI on its final PR HEAD `d8bb2cfcb0b1e5cf7ddf41587ea7085299f9f5a0` was green (run #45 / ID `33643178944`, check `ci` ID `100291140896` — `completed` / `success`, 2026-09-02T14:40:09Z). CI on the merge commit is green: run #46 / ID `33644092110`, attempt 2, check `ci` ID `100362024710` — `completed` / `success` (2026-09-02T18:00:38Z); attempt 1 of that same run (job ID `100294231087`) was `cancelled` at 2026-09-02T15:31:14Z while its `Run tests` step was still in progress — this is CI incident `33644092110`, recorded (and explicitly not attributed) below.
+6. PROD-015 / PR #30 is `MERGED` / completed (merged 2026-09-02T19:13:01Z by the Owner); its merge commit is exactly the baseline SHA `2a616450a107d7b7d53f39f5c3776baff1921515`. CI on its final PR HEAD `76d9fc7b13ac2ccd2c54317ebd5319efe257bfa5` was green (run #48 / ID `33671082942`, check `ci` ID `100384573576` — `completed` / `success`, 2026-09-02T19:08:26Z); CI on its first commit `b8fa953364a700740af49661458c4b7fb3d4a99b` was also green (run #47 / ID `33668185398`, check `ci` ID `100374971862` — `completed` / `success`, 2026-09-02T18:39:09Z).
+7. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+8. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-016 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-016 — Advance production baseline after PROD-014 and PROD-015 (Issue #31) |
+| Status | Documentation-only governance change; pending Architect review and Owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `1b4f069c159b198d30ee82a71b65198ce11bd2b7` → `2a616450a107d7b7d53f39f5c3776baff1921515` (`main`) |
+| Completed production changes | PROD-014 / PR #28 — merged 2026-09-02T14:45:01Z; PROD-015 / PR #30 — merged 2026-09-02T19:13:01Z |
+| Intermediate governance merge in range | PROD-013 / PR #26 — merged 2026-09-02T13:52:54Z (docs-only; merge commit `b80568fc9d675c25cca4d53f89fa79902d6dc916`; CI run #44 / ID `33638464256`, check `ci` ID `100275198811` — `completed` / `success`) |
+| Verified on | 2026-09-02 |
+
+### Completion record — PROD-014 / PR #28 (merged)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-014 — Enforce uniqueness of `Payment.external_id` (F-15) (Issue #27) |
+| Status | ✅ MERGED / completed on 2026-09-02T14:45:01Z — not in review, not open |
+| Pull request | #28 (`Kvasha62/Amazone_Clone_Production`) — `PROD-014: Enforce uniqueness of Payment.external_id (F-15)` — MERGED |
+| Branch | `arena/01a0626a-amazone-clone-production` |
+| Final PR HEAD SHA | `d8bb2cfcb0b1e5cf7ddf41587ea7085299f9f5a0` — `PROD-014 (F-15): enforce DB-level uniqueness of Payment.external_id` |
+| CI on final PR HEAD | ✅ green — GitHub Actions run #45 / ID `33643178944`, check run `ci` ID `100291140896` — `completed` / `success` |
+| Merge commit on `main` | `d7e383b3a5ba1a4550d0e059234a570918b5b44a` — `Merge pull request #28 from Kvasha62/arena/01a0626a-amazone-clone-production` |
+| CI on merge commit | ✅ green — GitHub Actions run #46 / ID `33644092110`, attempt 2, check run `ci` ID `100362024710` — `completed` / `success` (attempt 1 was `cancelled`; see the CI-incident note below) |
+| Files changed | `apps/payments/models/payment.py`, `apps/payments/migrations/0004_payment_external_id_unique.py` (new), `apps/payments/querysets/payment_queryset.py`, `apps/payments/tests/test_external_id_uniqueness.py` (new), `ARCHITECTURE.md` |
+
+Scope of PROD-014 (closed audit finding F-15): non-blank `Payment.external_id`
+is now globally unique at the database boundary — partial
+`UniqueConstraint(payment_external_id_unique)` (`WHERE external_id <> ''`)
+declared in `Payment.Meta.constraints`, the plain `db_index` on the column
+replaced by that partial unique index, migration `payments.0004` with a
+fail-loud duplicate guard that aborts before any DDL, and 13 regression tests.
+Webhook correlation (`with_external_id(...).first()`) is unchanged and now
+deterministic. No API contract, dependency, CI workflow, or deployment changes
+were part of PROD-014.
+
+### Completion record — PROD-015 / PR #30 (merged)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-015 — Make reviews/discounts concurrency tests fail boundedly (Issue #29) |
+| Status | ✅ MERGED / completed on 2026-09-02T19:13:01Z — not in review, not open |
+| Pull request | #30 (`Kvasha62/Amazone_Clone_Production`) — `PROD-015: Make reviews/discounts concurrency tests fail boundedly` — MERGED |
+| Branch | `arena/01a06362-amazone-clone-production` |
+| Commits | `b8fa953364a700740af49661458c4b7fb3d4a99b` — `PROD-015: bounded failure for reviews/discounts concurrency tests`; `76d9fc7b13ac2ccd2c54317ebd5319efe257bfa5` — `PROD-015: guarantee stuck workers cannot hold the test database` (final PR HEAD) |
+| CI on final PR HEAD | ✅ green — GitHub Actions run #48 / ID `33671082942`, check run `ci` ID `100384573576` — `completed` / `success` (intermediate HEAD `b8fa9533…`: run #47 / ID `33668185398`, check `ci` ID `100374971862` — `completed` / `success`) |
+| Merge commit on `main` | `2a616450a107d7b7d53f39f5c3776baff1921515` — `Merge pull request #30 from Kvasha62/arena/01a06362-amazone-clone-production` — **the new baseline SHA** |
+| CI on merge commit | ✅ green — GitHub Actions run #49 / ID `33671965689`, check run `ci` ID `100387493188` — `completed` / `success` |
+| Files changed | `apps/core/tests/__init__.py` (new), `apps/core/tests/concurrency.py` (new), `apps/core/tests/test_concurrency_db.py` (new), `apps/core/tests/test_concurrency_runner.py` (new), `apps/reviews/tests/test_concurrency.py`, `apps/discounts/tests/test_concurrency.py`, `config/test_runner.py` |
+
+Scope of PROD-015 (test infrastructure only): the executor-based concurrency
+tests in `reviews` and `discounts` relied on `with ThreadPoolExecutor(...)`,
+whose exit calls `shutdown(wait=True)` and could therefore wait indefinitely
+for a stuck worker after `future.result(timeout=...)`. They now run through the
+test-only bounded runner in `apps/core/tests/concurrency.py`
+(`run_concurrent_jobs`, `WorkerSessionRegistry`, `ConcurrentJobsMixin`):
+daemon worker threads joined against one shared deadline, server-side
+`statement_timeout` / `lock_timeout` / `idle_in_transaction_session_timeout`
+on worker sessions, `pg_terminate_backend()` of stuck worker sessions from the
+main thread before Django teardown, bounded verification that the test
+database has been released, and deterministic failure reporting with
+diagnostics. All pre-existing concurrency and consistency assertions were
+preserved; 14 runner-semantics tests and 7 PostgreSQL guarantee tests were
+added; `apps.core.tests` was added to `TEST_APP_LABELS` in
+`config/test_runner.py`. No production business logic, public API, model,
+migration, dependency, CI workflow, or deployment changes were part of
+PROD-015.
+
+**CI incident `33644092110` — explicitly not attributed to PROD-015.**
+GitHub Actions run #46 / ID `33644092110` (push of the PROD-014 merge commit
+`d7e383b3a5ba1a4550d0e059234a570918b5b44a`) was `cancelled` on its first
+attempt at 2026-09-02T15:31:14Z while the `Run tests` step was still in
+progress; the same SHA passed unchanged on re-run (attempt 2, `success`,
+2026-09-02T18:00:38Z). PROD-015 addressed the independently established
+bounded-concurrency test lifecycle defect described above. It is **not**
+recorded here as the proven root cause of that incident; the incident remains
+a separate, unattributed item and is not resolved by this baseline advance.
+
+PROD-014 and PROD-015 are recorded as completed/merged via PR #28 and PR #30
+respectively, and both are part of the verified `main` state at the new
+baseline SHA. No functional, model, schema, migration, dependency, CI workflow,
+deployment, or educational-repository changes are introduced by PROD-016, and
+no remaining audit finding is remediated by it — all remaining audit findings
+are outside this ticket and remain unchanged. Architect review is required
+before the Owner performs the final merge; the Architect/Assistant must not
+merge this governance pull request.
+
+## Historical baseline record — PROD-013 (superseded)
+
+This record was current immediately before PROD-016. It is preserved for audit
+and is now superseded by the approved baseline at the top of this document.
 
 | Field | Value |
 |---|---|
@@ -14,41 +141,27 @@
 | Approved on | 2026-09-02 |
 | Ticket | PROD-013 |
 
-Production `main` points exactly at this SHA. This commit is the current
-production source-of-truth commit and the frozen reference point for every
-subsequent production change. `main` at
-`1b4f069c159b198d30ee82a71b65198ce11bd2b7` is the authoritative production
-state. It is the merge commit for completed PROD-012 (PR #24). Earlier baseline
-records are preserved below as history.
-
-## Verification performed (read-only)
-
-1. GitHub `main`, local `main`, and `origin/main` all resolve to `1b4f069c159b198d30ee82a71b65198ce11bd2b7` — an exact match with the current production baseline SHA (verified 2026-09-02).
-2. GitHub Actions workflow `CI`, run #42 / ID `33636809167`: `head_sha` = `1b4f069c159b198d30ee82a71b65198ce11bd2b7` (exact match), event `push`, status `completed`, conclusion `success`, completed 2026-09-02T13:40:15Z; job `ci` (ID `100269608813`) is `completed` / `success`.
-3. Every CI job step succeeded on the baseline SHA: `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks`, `Migration check`, `Apply migrations`, and `Run tests` all concluded `success`.
-4. PROD-012 / PR #24 is `MERGED` / completed (merged 2026-09-02T13:36:56Z); its merge commit is exactly `1b4f069c159b198d30ee82a71b65198ce11bd2b7`. CI on its final PR HEAD `051f6ab31fdede888446c65868c00a92ded234af` was also green (run #41 / ID `33636174754`, check `ci` ID `100267488189` — `completed` / `success`).
-5. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
-6. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
-
-## Baseline advance — PROD-013 (this document)
+## Baseline advance — PROD-013 (merged; record preserved)
 
 | Field | Value |
 |---|---|
 | Ticket | PROD-013 — Advance production baseline after PROD-012 (Issue #25) |
-| Status | Documentation-only governance change; pending Architect review and Owner merge |
-| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Status | Documentation-only governance change; merged and completed (PR #26, merge commit `b80568fc9d675c25cca4d53f89fa79902d6dc916`, merged 2026-09-02T13:52:54Z) |
+| Change class | That pull request changed only `docs/production/PRODUCTION_BASELINE.md` |
 | Advance | Previous baseline `406a96c37b0d0249ea7f44b459a54dca8566561b` → `1b4f069c159b198d30ee82a71b65198ce11bd2b7` (`main`) |
 | Completed production change | PROD-012 / PR #24 — merged 2026-09-02 |
 | Verified on | 2026-09-02 |
 
 PROD-012 is recorded as completed/merged via PR #24
-(`PROD-012: Harden ShippingService synchronous exception handling (F-14)`).
+(`PROD-012: Harden ShippingService synchronous exception handling (F-14)`);
+it was merged 2026-09-02T13:36:56Z with merge commit
+`1b4f069c159b198d30ee82a71b65198ce11bd2b7`, and CI on its final PR HEAD
+`051f6ab31fdede888446c65868c00a92ded234af` was green (run #41 / ID
+`33636174754`, check `ci` ID `100267488189` — `completed` / `success`).
 Its ShippingService synchronous exception-handling hardening (F-14) is part of
 the verified `main` state. No functional, model, schema, migration, dependency,
-CI workflow, deployment, or educational-repository changes are introduced by
-PROD-013. All other remaining audit findings are outside this ticket and remain
-unchanged. Architect review is required before the Owner performs the final
-merge; the Architect/Assistant must not merge this governance pull request.
+CI workflow, deployment, or educational-repository changes were introduced by
+PROD-013.
 
 ## Historical baseline record — PROD-011 (superseded)
 
