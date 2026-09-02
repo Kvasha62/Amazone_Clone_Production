@@ -50,10 +50,10 @@ No other change may modify the baseline record.
 | Ticket | PROD-003 — Make order↔inventory↔payment coordination fail-safe |
 | Pull request | #5 (`Kvasha62/Amazone_Clone_Production`) |
 | Branch | `arena/01a05e31-amazone-clone-production` |
-| New baseline SHA (PR head) | `a9139b12e19c21d39fd0c8e72027aac4641307e0` |
-| Commit title | `PROD-003: durable refund recording via independent psycopg connection` |
-| CI status on this SHA | ✅ green — check run `ci` `completed` / `success`, GitHub Actions run `33591265015` |
-| Test suite | `Ran 1155 tests in 126.347s — OK` (PostgreSQL 18.6, Python 3.13.15, Django 6.1); migrations check OK |
+| New baseline SHA (final code head of PR #5) | `df74d6a945fe813ad02a7818409173ef2df6b742` |
+| Commit title | `PROD-003: move inventory concurrency fixes into InventoryService (remove monkey-patch)` |
+| CI status on this SHA | ✅ green — check run `ci` `completed` / `success`, GitHub Actions run `33594177345` |
+| Test suite | `Ran 1159 tests in 120.694s — OK` (PostgreSQL 18.6, Python 3.13.15, Django 6.1); migrations check OK |
 | Approved on | 2026-09-02 |
 
 Scope of PROD-003 (all in this PR, CI green on the head SHA):
@@ -63,6 +63,12 @@ Scope of PROD-003 (all in this PR, CI green on the head SHA):
   RESERVE/RELEASE/OUT movements (idempotent reserve/release/commit,
   no double-decrement under concurrency — covered by
   `apps/inventory/tests/test_idempotency.py`);
+- all inventory concurrency fixes (release/commit race exclusion,
+  DELIVERED reconciliation with reserve recovery) live canonically in
+  `apps/inventory/services/inventory_service.py` — the runtime
+  monkey-patching module `apps/inventory/services/prod003_ci_fixes.py`
+  is removed and its reintroduction is guarded by tests
+  (`InventoryServiceCanonicalImplementationTests`);
 - refund failures are never lost: `refund_required_amount` +
   `refund_failed` events, `retry_pending_refunds` settles them
   idempotently; durable recording writes the obligation through an
@@ -76,5 +82,6 @@ Scope of PROD-003 (all in this PR, CI green on the head SHA):
 `main` is not modified or merged by this ticket: it currently points at
 `3fff49f158cf2aa6f93fd5bf98053c60de57c4b2` and the PROD-000 record above
 remains the frozen reference for `main`; the advance recorded here takes
-effect when PR #5 is merged.
+effect when PR #5 is merged. This record is certified by a docs-only
+commit on top of the SHA named above; CI is green on both commits.
 
