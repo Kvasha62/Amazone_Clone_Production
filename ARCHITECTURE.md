@@ -224,13 +224,17 @@ read-write race would violate business invariants:
 |------------------------------------|---------------------------------------|
 | `Stock.quantity` / `reserved`      | Two users checkout same variant       |
 | `Cart` during merge                | Guest and user carts modified together |
-| `Order._order_number_seq`          | Parallel order creation               |
 | `Payment.status` on webhook        | Duplicate webhook delivery            |
 
 Service methods that only insert new rows or modify single-user state
 (e.g. creating a `Review`, updating `UserProfile`) do not require
 `select_for_update()` but may still use `@transaction.atomic` for
 atomicity.
+
+Order-number allocation is not row-lock state: `Order.save()` obtains the
+number from the PostgreSQL sequence `orders_order_number_seq`
+(`nextval()`), which is atomic in the database, so parallel order creation
+needs no `select_for_update()` and no read-then-increment (ADR-005).
 
 ### 3. BaseModel (Abstract Base Class)
 
@@ -453,8 +457,11 @@ existing orders.
 
 - **Status FSM**: `PENDING → CONFIRMED → PROCESSING → SHIPPED → DELIVERED`
   Any non-terminal state → `CANCELLED`
-- `order_number`: auto-generated `ORD-000001` with retry on `IntegrityError`
-- `_order_number_seq`: sequential counter with `UniqueConstraint`
+- `order_number`: auto-generated `ORD-000001` by `Order.save()` from the
+  PostgreSQL sequence `orders_order_number_seq` (`nextval()`), so concurrent
+  order creation cannot allocate the same number (ADR-005)
+- `_order_number_seq`: numeric part of the order number, issued by the same
+  sequence; `order_number` carries `unique=True` as the uniqueness invariant
 - `OrderService.cancel()`: calls `InventoryService.release_stock()`
   and `PaymentService.refund_payment()` for succeeded payments
 
@@ -604,7 +611,7 @@ Stock ──1:N── StockMovement (audit)
 |--------------------|---------------------------------------------|--------------------------------|
 | `cart_cart`        | `unique_active_user_cart`                   | One active cart per user       |
 | `cart_cartitem`    | `unique_cart_variant`                       | No duplicate variants in cart  |
-| `orders_order`     | `_order_number_seq` unique                  | No duplicate order numbers     |
+| `orders_order`     | `order_number` `unique=True`                | No duplicate order numbers     |
 | `orders_orderitem` | `unique_order_sku`                          | No duplicate SKUs in order     |
 | `reviews_review`   | `unique_user_product_review`                | One review per user per product|
 | `review_helpful`   | `unique_user_review_helpful_vote`           | One vote per user per review   |
@@ -612,8 +619,9 @@ Stock ──1:N── StockMovement (audit)
 | `inventory_stock`  | `stock_quantity_non_negative`               | Quantity ≥ 0                   |
 | `payments_payment` | `payment_refund_lte_amount`                 | Refund cannot exceed payment   |
 
-> Uniqueness invariants use `UniqueConstraint`; range/validity invariants
-> use `CheckConstraint(condition=...)`.
+> Uniqueness invariants use `UniqueConstraint` (or a field-level
+> `unique=True`, as for `orders_order.order_number`); range/validity
+> invariants use `CheckConstraint(condition=...)`.
 
 ---
 

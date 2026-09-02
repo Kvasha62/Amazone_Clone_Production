@@ -24,19 +24,18 @@
 #   • Все сервисы, views, сериализаторы заказов → ImportError
 # ────────────────────────────────────────────────────────────────────────
 
+import logging
 from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import connections, models, router
 from django.db.models import Q
 
 from apps.core.models.base_model import BaseModel
 from apps.orders.managers.order_manager import OrderManager
 
-# Ленивый импорт функций генерации номера заказа.
-# Функция определена ниже в файле, но нам нужна ссылка до определения класса.
-# Поэтому используем callable (функцию) как default — Django вызовет её при create().
+logger = logging.getLogger(__name__)
 
 
 # ==============================================================
@@ -122,20 +121,22 @@ ORDER_STATUS_TRANSITIONS: dict[str, list[str]] = {
 }
 
 
-# ==============================================================
-# ГЕНЕРАТОР НОМЕРА ЗАКАЗА
-# ==============================================================
-def generate_order_number() -> str:
+# =============================================================
+# ВЫДАЧА НОМЕРА ЗАКАЗА (F-13 / PROD-010)
+# =============================================================
+# Имя PostgreSQL SEQUENCE. Создаётся миграцией
+# apps/orders/migrations/0003_order_number_sequence.py и выставляется
+# из MAX(_order_number_seq), чтобы существующие заказы не пересекались
+# с новыми номерами.
+ORDER_NUMBER_SEQUENCE = 'orders_order_number_seq'
+
+
+def format_order_number(sequence_value: int) -> str:
     """
-    Генерирует уникальный номер заказа: ORD-000001.
+    Форматирует числовое значение в публичный номер заказа.
 
     ФОРМАТ: {ORDER_NUMBER_PREFIX}-{6 цифр, zero-padded}
     ПРИМЕР: ORD-000001, ORD-000123, ORD-999999, ORD-1000000
-
-    АЛГОРИТМ:
-      1. Получить максимальный числовой суффикс из БД
-      2. Прибавить 1
-      3. Отформатировать с leading zeros
 
     ПОЧЕМУ НЕ UUID:
       • ORD-000123 → легко диктовать по телефону
@@ -145,25 +146,70 @@ def generate_order_number() -> str:
     ПОЧЕМУ НЕ ПРОСТО PK (id):
       • id=1 раскрывает количество заказов (конкурентная разведка)
       • Формат ORD-000123 — профессиональный, распознаваемый
+    """
+    from apps.orders.constants import ORDER_NUMBER_DIGITS, ORDER_NUMBER_PREFIX
 
-    THREAD-SAFETY:
-      В high-concurrency среде два потока могут получить одинаковый max().
-      Защита: UniqueConstraint на order_number → IntegrityError → retry.
-      Альтернатива: PostgreSQL SEQUENCE — надёжнее для high-load.
+    return f'{ORDER_NUMBER_PREFIX}-{sequence_value:0{ORDER_NUMBER_DIGITS}d}'
+
+
+def allocate_order_number(*, using: str | None = None) -> tuple[int, str]:
+    """
+    Выдаёт следующий номер заказа: (числовая часть, 'ORD-000123').
+
+    МЕХАНИЗМ (F-13 / PROD-010):
+      PostgreSQL SEQUENCE — ``SELECT nextval('orders_order_number_seq')``.
+      nextval() атомарен на стороне СУБД: каждый вызов получает собственное
+      значение без чтения таблицы, без блокировок приложения и без
+      read-then-increment. Параллельные создания заказа физически не могут
+      получить один номер, поэтому retry на IntegrityError не нужен.
+
+    ПОЧЕМУ НЕ MAX()+1 (прежняя схема):
+      ``SELECT MAX(_order_number_seq) → +1 → INSERT`` — это
+      read-then-increment: две параллельные транзакции читали один MAX и
+      вставляли один номер. UNIQUE(order_number) не пропускал дубль, но
+      превращал гонку в ошибку: повторный INSERT внутри той же транзакции
+      невозможен (она aborted), поэтому конкурентный checkout падал.
+
+    СЕМАНТИКА ОТКАТА (документированное поведение SEQUENCE):
+      nextval() НЕ транзакционен — откат транзакции расходует значение,
+      номер не переиспользуется. В нумерации возможны gaps; гарантируются
+      уникальность и монотонность. Gapless-нумерация архитектурой не
+      требуется (см. ADR-005).
+
+    NON-POSTGRESQL BACKENDS (dev-режим, например SQLite):
+      SEQUENCE отсутствуют, поэтому используется fallback MAX()+1 с
+      предупреждением в логе. Это НЕ production-путь: production-СУБД
+      проекта — PostgreSQL (CI и docker-compose.prod), а UNIQUE(order_number)
+      остаётся последним рубежом уникальности на любом бэкенде.
 
     📖 https://www.postgresql.org/docs/current/functions-sequence.html
     """
-    from apps.orders.constants import ORDER_NUMBER_PREFIX, ORDER_NUMBER_DIGITS
+    connection = (
+        connections[using] if using
+        else connections[router.db_for_write(Order)]
+    )
+    sequence_value = _next_order_number_sequence(connection)
+    return sequence_value, format_order_number(sequence_value)
 
-    # aggregate(max=Max('...')) → один SQL-запрос:
-    #   SELECT MAX(order_number_numeric) FROM orders_order
-    # Возвращает None если таблица пуста.
-    max_number = Order.objects.aggregate(
-        max_num=models.Max('_order_number_seq'),
-    )['max_num'] or 0
 
-    next_num = max_number + 1
-    return f'{ORDER_NUMBER_PREFIX}-{next_num:0{ORDER_NUMBER_DIGITS}d}'
+def _next_order_number_sequence(connection) -> int:
+    """Возвращает следующее числовое значение номера заказа."""
+    if connection.vendor == 'postgresql':
+        with connection.cursor() as cursor:
+            # Имя SEQUENCE передаётся параметром (nextval принимает его как
+            # regclass) — конкатенации SQL нет.
+            cursor.execute('SELECT nextval(%s)', [ORDER_NUMBER_SEQUENCE])
+            return int(cursor.fetchone()[0])
+
+    # Fallback для бэкендов без SEQUENCE (SQLite — dev-режим, не production).
+    logger.warning(
+        'order_number_sequence_unsupported_backend',
+        extra={'vendor': connection.vendor},
+    )
+    max_seq = Order.objects.using(connection.alias).aggregate(
+        max_seq=models.Max('_order_number_seq'),
+    )['max_seq'] or 0
+    return max_seq + 1
 
 
 # ==============================================================
@@ -245,10 +291,10 @@ class Order(BaseModel):
         blank=True,
     )
 
-    # Внутренний числовой счётчик для генерации order_number.
-    # Храним отдельно от order_number для быстрого MAX() в generate_order_number().
-    # Без этого пришлось бы парсить строку 'ORD-000123' → медленно и ненадёжно.
-    # db_index=True — aggregate(Max('_order_number_seq')) использует индекс.
+    # Внутренний числовой счётчик номера заказа.
+    # Храним отдельно от order_number, чтобы не парсить строку 'ORD-000123'
+    # при разборе номера (аналитика, интеграции, отладка).
+    # Значение выдаёт PostgreSQL SEQUENCE (см. allocate_order_number()).
     _order_number_seq = models.PositiveBigIntegerField(
         editable=False,
         db_index=True,
@@ -566,36 +612,38 @@ class Order(BaseModel):
 
     def save(self, *args, **kwargs):
         """
-        Переопределённый save() — авто-генерация order_number и _order_number_seq.
+        Переопределённый save() — выдача order_number и _order_number_seq.
 
-        АЛГОРИТМ:
+        АЛГОРИТМ (F-13 / PROD-010):
           Если order_number пустой:
-            1. Получить MAX(_order_number_seq) из БД
-            2. Установить _order_number_seq = MAX + 1
+            1. Взять следующее значение PostgreSQL SEQUENCE
+               (allocate_order_number() → nextval('orders_order_number_seq'))
+            2. Установить _order_number_seq = полученное значение
             3. Сформировать order_number: ORD-000001
 
-        ПОЧЕМУ В save(), А НЕ В default=generate_order_number:
+        ПОЧЕМУ ЭТО БЕЗОПАСНО ПРИ КОНКУРЕНТНОМ СОЗДАНИИ:
+          Номер выдаёт СУБД, а не приложение: nextval() атомарен, поэтому
+          две параллельные транзакции не могут получить одно значение.
+          Прежняя схема «MAX(_order_number_seq) + 1» была
+          read-then-increment: параллельные заказы читали один MAX, второй
+          INSERT падал на UNIQUE(order_number), и оформление завершалось
+          ошибкой. UNIQUE(order_number) сохранён как последний рубеж
+          инварианта уникальности.
+
+        ПОЧЕМУ В save(), А НЕ В default=callable:
           default=func вызывается для КАЖДОГО create() — но func не может
           установить _order_number_seq на экземпляре (у неё нет доступа к self).
-          Результат: все экземпляры получают одинаковый order_number →
-          IntegrityError при втором save().
+          save() имеет доступ к self и заполняет оба поля согласованно.
 
-          save() же имеет доступ к self и может атомарно:
-            1. Прочитать MAX
-            2. Установить оба поля
-            3. Записать в БД
+        ОДИН ПУТЬ ВЫДАЧИ:
+          Номер выдается здесь для всех созданий заказа — OrderService,
+          admin add, management commands, фабрики. Явно заданный
+          order_number не перезаписывается.
 
         📖 https://docs.djangoproject.com/en/stable/ref/models/instances/#overriding-model-methods
         """
         if not self.order_number:
-            from apps.orders.constants import ORDER_NUMBER_PREFIX, ORDER_NUMBER_DIGITS
-
-            max_seq = Order.objects.aggregate(
-                max_seq=models.Max('_order_number_seq'),
-            )['max_seq'] or 0
-            self._order_number_seq = max_seq + 1
-            self.order_number = (
-                f'{ORDER_NUMBER_PREFIX}-'
-                f'{self._order_number_seq:0{ORDER_NUMBER_DIGITS}d}'
+            self._order_number_seq, self.order_number = allocate_order_number(
+                using=kwargs.get('using'),
             )
         super().save(*args, **kwargs)
