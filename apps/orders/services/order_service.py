@@ -64,10 +64,17 @@ class OrderService:
         user,
         cart: Cart,
         *,
-        delivery_cost=0,
         notes: str = '',
     ) -> Order:
-        """Create an order from an active user's cart."""
+        """Create an order from an active user's cart.
+
+        F-08 / PROD-006: доставка НЕ является входным параметром.
+        ``Order.delivery_cost`` вычисляется на сервере через
+        ``ShippingService.calculate_order_delivery_cost()`` из суммы
+        заказа, адреса доставки и весов вариантов — поэтому ни один
+        вызывающий код (включая checkout API) не может подставить
+        денежную сумму доставки из запроса клиента.
+        """
         from decimal import Decimal
 
         if cart.user_id != user.pk:
@@ -139,7 +146,16 @@ class OrderService:
                 'detail': 'Добавьте адрес доставки перед оформлением заказа.',
             })
 
-        delivery_cost_decimal = Decimal(str(delivery_cost))
+        # F-08: вес заказа — серверные данные каталога
+        # (ProductVariant.weight), а не запрос клиента. Варианты без веса
+        # просто не участвуют в весовой части тарифа.
+        total_weight = Decimal('0.00')
+        for cart_item in valid_items:
+            variant_weight = cart_item.variant.weight
+            if variant_weight is None:
+                continue
+            total_weight += variant_weight * cart_item.quantity
+        weight_kg = total_weight if total_weight > 0 else None
 
         from django.db import IntegrityError
         from apps.orders.constants import ORDER_NUMBER_PREFIX, ORDER_NUMBER_DIGITS
@@ -163,7 +179,8 @@ class OrderService:
                 street=address.street,
                 postal_code=address.postal_code,
                 subtotal=Decimal('0.00'),
-                delivery_cost=delivery_cost_decimal,
+                # F-08: доставка проставляется ниже серверным расчётом.
+                delivery_cost=Decimal('0.00'),
                 discount=Decimal('0.00'),
                 total=Decimal('0.00'),
                 notes=notes,
@@ -199,8 +216,28 @@ class OrderService:
             ))
         OrderItem.objects.bulk_create(order_items_bulk)
 
+        # Сначала subtotal — он нужен как база для порога бесплатной доставки.
         order.recalculate_total()
-        order.save(update_fields=['subtotal', 'total', 'updated_at'])
+
+        # F-08 / PROD-006: единственная авторитетная цена доставки.
+        # Считается на сервере из subtotal, адреса доставки и весов
+        # вариантов; денежная сумма из запроса клиента не используется.
+        from apps.shipping.services.shipping_service import ShippingService
+
+        order.delivery_cost = ShippingService.calculate_order_delivery_cost(
+            order_total=order.subtotal,
+            region=order.region,
+            city=order.city,
+            weight_kg=weight_kg,
+        )
+        # total = subtotal + delivery_cost - discount (формула модели).
+        order.recalculate_total()
+        order.save(update_fields=[
+            'subtotal',
+            'delivery_cost',
+            'total',
+            'updated_at',
+        ])
 
         if order.total < MIN_ORDER_TOTAL:
             raise ValidationError({
@@ -220,6 +257,7 @@ class OrderService:
                 'order_number': order.order_number,
                 'user_id': user.pk,
                 'total': str(order.total),
+                'delivery_cost': str(order.delivery_cost),
                 'items_count': len(order_items_bulk),
             },
         )

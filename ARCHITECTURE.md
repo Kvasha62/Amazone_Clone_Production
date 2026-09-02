@@ -338,6 +338,18 @@ existing orders.
 
 ### `Order.delivery_cost` — Shipping Cost Snapshot
 
+- **Server-authoritative (F-08).** Computed at checkout by
+  `ShippingService.calculate_order_delivery_cost()` from trusted
+  server-side data only: the order's delivery address (region/city →
+  `ShippingZone`), the zone's active `ShippingMethod` tariff
+  (`base_price`, `price_per_kg`, `free_shipping_threshold`,
+  `max_shipping_cost`) and the catalog weights of the ordered variants.
+- `POST /api/v1/orders/` does **not** accept `delivery_cost`: the field is
+  not part of `CreateOrderInputSerializer` and an explicitly supplied value
+  is rejected with `400`. `OrderService.create_from_cart()` has no
+  `delivery_cost` parameter, so no caller can inject a delivery amount.
+- If no zone resolves for the address, or the zone has no active method,
+  the charge is `NO_DELIVERY_CHARGE` (`0.00`).
 - Copied from the shipping cost calculation at checkout.
 - If `ShippingMethod.base_price` changes later, existing orders
   retain the original delivery cost.
