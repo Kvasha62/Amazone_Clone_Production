@@ -32,7 +32,7 @@ Issue #15). Существует **ровно одна** production-страте
             :8080 (PROD_HTTP_PORT)
   браузер ─────────► nginx ─┬─ /static/*  → volume static_data (RO)
                             ├─ /media/*   → volume media_data  (RO)
-                            ├─ /healthz   → 200 (liveness nginx)
+                            ├─ /healthz/  → 200 (liveness nginx)
                             └─ прочее ──► web (gunicorn :8000)
                                              │  healthcheck → /api/v1/health/
                                              ├──► db    (postgres:18, pgdata)
@@ -207,19 +207,22 @@ Health-check не раскрывает секреты и данные прило
 по вашей процедуре секретов).
 
 ```bash
-# Бэкап БД
-docker exec amazone-clone-prod-db pg_dump -U amazonclone -Fc amazonclone > backup_$(date +%F).dump
+# Бэкап БД. Имена БД/пользователя НЕ хардкодятся: команды читают
+# POSTGRES_USER / POSTGRES_DB из окружения db-контейнера — те самые
+# значения, что заданы в .env.production (какими бы они ни были).
+docker exec amazone-clone-prod-db \
+  sh -c 'pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB"' > backup_$(date +%F).dump
 # Бэкап медиа
 docker run --rm -v amazone-clone-prod-media:/data -v "$PWD":/backup alpine \
   tar czf /backup/media_$(date +%F).tar.gz -C /data .
 ```
 
 Восстановление: остановить стек (`stop`), развернуть volume из архива,
-развернуть БД:
+развернуть БД (имена — снова из окружения db-контейнера):
 
 ```bash
 cat backup.dump | docker exec -i amazone-clone-prod-db \
-  pg_restore -U amazonclone -d amazonclone --clean --if-exists
+  sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists'
 ./scripts/prod.sh start
 ```
 

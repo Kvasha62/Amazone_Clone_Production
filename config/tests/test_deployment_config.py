@@ -394,16 +394,60 @@ class NginxConfigTests(SimpleTestCase):
         self.assertIn("proxy_set_header Host $host", self.conf)
 
     def test_serves_static_and_media_from_shared_volumes(self):
-        self.assertIn("location /static/", self.conf)
+        self.assertIn(f"location {settings.STATIC_URL}", self.conf)
         self.assertIn(f"alias {STATIC_CONTAINER_PATH}/", self.conf)
         self.assertIn("location /media/", self.conf)
         self.assertIn(f"alias {MEDIA_CONTAINER_PATH}/", self.conf)
 
     def test_liveness_endpoint(self):
-        self.assertIn("location = /healthz", self.conf)
+        """Canonical liveness URI is exactly /healthz/ (trailing slash)."""
+        self.assertIn("location = /healthz/", self.conf)
+        # The old slash-less exact match must not come back (review BLOCKER 1).
+        self.assertNotIn("location = /healthz {", self.conf)
+
+    def test_healthz_uri_consistent_across_stack(self):
+        """BLOCKER 1: nginx, compose healthcheck and docs use one URI — /healthz/."""
+        canonical = "/healthz/"
+        # nginx serves exactly the canonical URI ...
+        self.assertIn(f"location = {canonical}", self.conf)
+        # ... the nginx container healthcheck probes the same URI ...
+        compose = yaml.safe_load(PROD_COMPOSE.read_text())
+        nginx_probe = " ".join(
+            compose["services"]["nginx"]["healthcheck"]["test"]
+        )
+        self.assertIn(canonical, nginx_probe)
+        # ... and so does the deployment documentation.
+        docs = (BASE_DIR / "docs" / "production" / "DEPLOYMENT.md").read_text()
+        self.assertIn(f"curl -fsS http://localhost:8080{canonical}", docs)
 
     def test_upload_limit_present(self):
         self.assertIn("client_max_body_size", self.conf)
+
+
+class StaticUrlRegressionTests(SimpleTestCase):
+    """PROD-008 architect review (BLOCKER 2): STATIC_URL must be root-absolute.
+
+    Protects against a regression to the relative ``static/`` form, which
+    produced relative asset URLs (``static/admin/...``) instead of
+    ``/static/admin/...`` when served by the production nginx edge
+    (``location /static/``). Cross-checked against nginx in
+    ``NginxConfigTests.test_serves_static_and_media_from_shared_volumes``.
+    """
+
+    def test_static_url_is_root_absolute(self):
+        self.assertEqual(settings.STATIC_URL, "/static/")
+
+    def test_static_url_never_regresses_to_relative(self):
+        self.assertTrue(
+            settings.STATIC_URL.startswith("/"),
+            "STATIC_URL must start with '/' (or a full CDN URL)",
+        )
+        self.assertNotEqual(settings.STATIC_URL, "static/")
+        self.assertFalse(settings.STATIC_URL.startswith("static/"))
+
+    def test_media_url_is_root_absolute(self):
+        """Sibling invariant: MEDIA_URL stays root-absolute as well."""
+        self.assertEqual(settings.MEDIA_URL, "/media/")
 
 
 class EnvExampleTests(SimpleTestCase):
