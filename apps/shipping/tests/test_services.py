@@ -14,10 +14,14 @@
 # ────────────────────────────────────────────────────────────────────────
 
 from decimal import Decimal
+from unittest import mock
 
+from django.db import DatabaseError
 from django.test import TestCase
 from rest_framework.exceptions import NotFound, ValidationError
 
+from apps.orders.models import Order
+from apps.orders.services.order_service import OrderService
 from apps.orders.tests.factories import create_test_order, create_test_user
 from apps.shipping.constants import MAX_SHIPPING_COST
 from apps.shipping.models import Shipment, ShippingMethod, ShippingZone
@@ -636,6 +640,144 @@ class SyncOrderStatusTests(TestCase):
         ShippingService._sync_order_status(shipment, 'preparing')
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, original_status)
+
+
+# ================================================================
+# F-14 / PROD-012: обработка исключений синхронного пути доставки
+# ================================================================
+
+class SyncExceptionHandlingTests(TestCase):
+    """Регрессия F-14: ошибки синхронного пути не проглатываются.
+
+    ОЖИДАЕМЫЙ доменный исход (ValidationError доменной FSM заказа) —
+    операция доставки завершается успешно, поведение API прежнее.
+    НЕОЖИДАННЫЙ сбой — пробрасывается наружу, транзакция откатывается,
+    частичное состояние Shipment/Order не сохраняется.
+    """
+
+    def setUp(self):
+        self.user = create_test_user()
+        self.order = create_test_order(self.user, status='confirmed')
+        self.zone = create_test_zone()
+        self.method = create_test_method(zone=self.zone)
+        self.shipment = create_test_shipment(
+            self.order, method=self.method, status='preparing',
+        )
+
+    # ── Успешный путь остаётся прежним ────────────────────────────
+
+    def test_successful_transition_still_syncs_order(self):
+        """AC-6: успешный переход по-прежнему синхронизирует заказ."""
+        shipment = ShippingService.transition_status(
+            self.shipment, 'in_transit',
+        )
+        self.order.refresh_from_db()
+        self.assertEqual(shipment.status, 'in_transit')
+        self.assertEqual(self.order.status, 'processing')
+
+    # ── ОЖИДАЕМЫЙ доменный исход ──────────────────────────────────
+
+    def test_expected_order_domain_error_does_not_break_shipment(self):
+        """AC-2: ValidationError доменной FSM заказа не ломает доставку."""
+        # Заказ в терминальном статусе → OrderService отклонит переход.
+        self.order.status = 'cancelled'
+        self.order.save(update_fields=['status'])
+
+        with self.assertLogs(
+            'apps.shipping.services.shipping_service', level='WARNING',
+        ) as logs:
+            shipment = ShippingService.transition_status(
+                self.shipment, 'in_transit',
+            )
+
+        self.assertEqual(shipment.status, 'in_transit')
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'in_transit')
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'cancelled')
+        self.assertIn('order_status_sync_rejected', ''.join(logs.output))
+
+    def test_expected_domain_error_from_shipment_fsm_still_raises(self):
+        """AC-2: недопустимый переход доставки по-прежнему ValidationError."""
+        with self.assertRaises(ValidationError):
+            ShippingService.transition_status(self.shipment, 'delivered')
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'preparing')
+
+    # ── НЕОЖИДАННЫЙ сбой ──────────────────────────────────────────
+
+    def test_unexpected_exception_is_not_swallowed(self):
+        """AC-1 / AC-3: неожиданное исключение доходит до вызывающего."""
+        with mock.patch.object(
+            OrderService,
+            'transition_status',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                ShippingService.transition_status(self.shipment, 'in_transit')
+
+    def test_unexpected_database_error_is_not_swallowed(self):
+        """AC-3: инфраструктурный сбой (DatabaseError) пробрасывается."""
+        with mock.patch.object(
+            OrderService,
+            'cancel',
+            side_effect=DatabaseError('connection lost'),
+        ):
+            with self.assertRaises(DatabaseError):
+                ShippingService.transition_status(self.shipment, 'returned')
+
+    def test_missing_order_is_not_swallowed(self):
+        """AC-3: отсутствующий Order — не «успех», а ошибка."""
+        with mock.patch(
+            'apps.orders.models.Order.objects.get',
+            side_effect=Order.DoesNotExist,
+        ):
+            with self.assertRaises(Order.DoesNotExist):
+                ShippingService.transition_status(self.shipment, 'in_transit')
+
+    # ── Откат транзакции ──────────────────────────────────────────
+
+    def test_failed_transition_rolls_back_shipment_state(self):
+        """AC-4: при неожиданном сбое Shipment не сохраняется частично."""
+        with mock.patch.object(
+            OrderService,
+            'transition_status',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                ShippingService.transition_status(self.shipment, 'in_transit')
+
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'preparing')
+        self.assertIsNone(self.shipment.shipped_at)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, 'confirmed')
+
+    def test_failed_transition_rolls_back_tracking_number(self):
+        """AC-4: трек-номер из неудавшегося перехода не сохраняется."""
+        with mock.patch.object(
+            OrderService,
+            'transition_status',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                ShippingService.transition_status(
+                    self.shipment, 'in_transit', tracking_number='TRK-999',
+                )
+
+        self.shipment.refresh_from_db()
+        self.assertNotEqual(self.shipment.tracking_number, 'TRK-999')
+
+    # ── Блокировки сохранены ──────────────────────────────────────
+
+    def test_transition_still_locks_shipment_row(self):
+        """AC-5: select_for_update() сохранён в пути перехода статуса."""
+        with mock.patch(
+            'apps.shipping.models.Shipment.objects.select_for_update',
+            wraps=Shipment.objects.select_for_update,
+        ) as locked:
+            ShippingService.transition_status(self.shipment, 'in_transit')
+        self.assertTrue(locked.called)
 
 
 # ================================================================

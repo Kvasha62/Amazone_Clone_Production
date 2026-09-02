@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import models, transaction
 from django.utils import timezone
 
@@ -545,8 +546,22 @@ class ShippingService:
             (EDU-002: cancel is the sole cancellation entrypoint;
             transition_status rejects CANCELLED)
 
-        Оборачиваем в try/except — ошибка синхронизации статуса заказа
-        не должна откатывать транзакцию отправления.
+        ОБРАБОТКА ОШИБОК (F-14 / PROD-012):
+          • ОЖИДАЕМЫЙ доменный исход — ``ValidationError`` доменной FSM
+            заказа (заказ уже в терминальном статусе, переход недопустим,
+            купонные правила отмены). Такой исход НЕ является сбоем
+            отправления: статус Shipment уже валиден по своей FSM, поэтому
+            рассинхрон логируется (WARNING) и операция доставки успешно
+            завершается — это существующее публичное поведение API.
+            Мутации заказа при этом откатываются полностью: методы
+            ``OrderService`` сами обёрнуты в ``@transaction.atomic``
+            (вложенный savepoint), поэтому частичного состояния заказа
+            не остаётся.
+          • НЕОЖИДАННЫЙ сбой (DatabaseError, отсутствующий Order,
+            программная ошибка, любое другое исключение) больше НЕ
+            подавляется: он пробрасывается наружу, откатывает внешнюю
+            транзакцию ``transition_status`` (Shipment не сохраняется)
+            и доходит до штатной error boundary DRF.
         """
         from apps.orders.models import Order
         from apps.orders.services.order_service import OrderService
@@ -595,11 +610,15 @@ class ShippingService:
                         'new_order_status': target_order_status,
                     },
                 )
-        except Exception as exc:
-            logger.error(
-                'order_status_sync_error',
+        except (ValidationError, DjangoValidationError) as exc:
+            # ОЖИДАЕМЫЙ доменный исход: FSM/правила заказа отклонили
+            # синхронизацию. Отправление остаётся валидным, ошибка видима
+            # в логах, неожиданные сбои сюда не попадают (F-14).
+            logger.warning(
+                'order_status_sync_rejected',
                 extra={
                     'order_id': shipment.order_id,
+                    'shipment_id': shipment.pk,
                     'shipment_status': shipment_status,
                     'error': str(exc),
                 },
