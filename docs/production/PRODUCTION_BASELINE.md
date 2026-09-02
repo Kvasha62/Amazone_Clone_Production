@@ -186,6 +186,7 @@ CI green on both the PR head and the merge commit):
 | Field | Value |
 |---|---|
 | Ticket | PROD-005 — Advance production baseline after PROD-003 and PROD-004 (Issue #8) |
+| Pull request | #9 (`Kvasha62/Amazone_Clone_Production`) |
 | Change class | Documentation-only (governance): this pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
 | Advance | `38648bddb82c8cd4848e03e930a46e499e4e017e` (PROD-000 record) → `78981863e20e4be705480157402156b455e77211` (`main`) |
 | Verified on | 2026-09-02 |
