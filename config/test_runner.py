@@ -26,6 +26,7 @@ from django.test.runner import DiscoverRunner
 # Используем ТОЧНЫЙ путь «apps.xxx.tests» — чтобы discover()
 # не пытался найти случайные директории-опечатки (tasts и т.п.).
 TEST_APP_LABELS = [
+    'config.tests',
     'apps.users.tests',
     'apps.catalog.tests',
     'apps.pricing.tests',
