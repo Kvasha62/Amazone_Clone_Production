@@ -29,7 +29,7 @@ import logging
 from django.conf import settings
 
 from rest_framework import status
-from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -439,7 +439,11 @@ class PaymentWebhookView(APIView):
                             },
                             note='Оплата поступила после завершения заказа.',
                         )
-                    except Exception as fail_exc:
+                    except (ValidationError, Payment.DoesNotExist) as fail_exc:
+                        # Ожидаемые доменные/not-found сбои закрытия платежа
+                        # логируются и оставляют контракт «завершённый заказ
+                        # не принимает деньги». Неожиданные ошибки (БД,
+                        # программные) пробрасываются и НЕ маскируются под 200.
                         logger.error(
                             'webhook_close_payment_failed',
                             extra={

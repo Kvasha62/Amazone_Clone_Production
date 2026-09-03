@@ -14,8 +14,6 @@
 #   - Отдельный endpoint чище, проще документировать
 # ────────────────────────────────────────────────────────────
 
-import logging
-
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -30,8 +28,6 @@ except ImportError:
         def decorator(func):
             return func
         return decorator
-
-logger = logging.getLogger(__name__)
 
 
 @extend_schema(
@@ -75,16 +71,16 @@ class ProductBySlugsView(APIView):
         if not slugs:
             return Response([])
 
-        # Запрос с prefetch (for_list — из queryset-миксина)
-        try:
-            products = list(
-                Product.objects.for_list().filter(
-                    slug__in=slugs,
-                )
+        # Запрос с prefetch. `for_list()` отсутствует в текущем main и
+        # раньше маскировался `except Exception` (endpoint всегда отдавал
+        # пустой список). Используем существующий публичный queryset-путь
+        # `visible().with_related()` и позволяем ошибкам БД/программным
+        # ошибкам достичь существующего error boundary API.
+        products = list(
+            Product.objects.visible().with_related().filter(
+                slug__in=slugs,
             )
-        except Exception:
-            logger.exception('Error fetching products by slugs')
-            return Response([])
+        )
 
         # Сериализация
         serializer = ProductListSerializer(products, many=True)

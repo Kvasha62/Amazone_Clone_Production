@@ -15,6 +15,9 @@
 
 import logging
 from io import StringIO
+from unittest import mock
+
+from kombu.exceptions import OperationalError as KombuOperationalError
 
 from django.contrib.auth.tokens import default_token_generator
 from django.test import TestCase, override_settings
@@ -25,6 +28,7 @@ from django.utils.http import urlsafe_base64_encode
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from apps.users.api_views.password_reset_views import PasswordResetRequestView
 from apps.users.models import User
 from apps.orders.tests.factories import create_test_user
 
@@ -54,6 +58,37 @@ class PasswordResetRequestTests(TestCase):
         """Invalid email format → 400."""
         resp = self.client.post(self.url, {'email': 'not-an-email'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_broker_failure_falls_back_to_sync(self):
+        """F-17: expected Celery/broker failures keep the sync fallback."""
+        with mock.patch(
+            'apps.notifications.tasks.send_password_reset_email.delay',
+            side_effect=KombuOperationalError('broker is down'),
+        ), mock.patch.object(
+            PasswordResetRequestView,
+            '_send_reset_email_sync',
+        ) as sync_send:
+            resp = self.client.post(
+                self.url,
+                {'email': 'reset@example.com'},
+                format='json',
+            )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        sync_send.assert_called_once()
+
+    def test_unexpected_celery_error_not_masked(self):
+        """F-17: programming failures must not silently fall back to sync."""
+        with mock.patch(
+            'apps.notifications.tasks.send_password_reset_email.delay',
+            side_effect=RuntimeError('bad task call'),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.post(
+                    self.url,
+                    {'email': 'reset@example.com'},
+                    format='json',
+                )
 
 
 class PasswordResetConfirmTests(TestCase):

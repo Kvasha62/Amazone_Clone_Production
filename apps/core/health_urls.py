@@ -10,6 +10,7 @@
 #   • Ошибка в API?
 # ────────────────────────────────────────────────────────────────────────
 
+from django.db import Error
 from django.http import JsonResponse
 from django.urls import path
 from django.views import View
@@ -37,7 +38,10 @@ class HealthCheckView(View):
         try:
             from django.db import connection
             connection.ensure_connection()
-        except Exception:
+        except Error:
+            # Health-контракт: недоступность БД → 503 degraded. Ловим
+            # только django.db.Error (database/operational failures), а не
+            # произвольные программные ошибки/конфигурационные сбои.
             db_ok = False
 
         status_code = 200 if db_ok else 503

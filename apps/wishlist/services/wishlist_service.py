@@ -232,7 +232,11 @@ class WishlistService:
                 )
                 item.delete()
                 moved += 1
-            except Exception as exc:
+            except (NotFound, ValidationError) as exc:
+                # Ожидаемые доменные причины пропуска одной позиции
+                # (нет варианта, неактивен, лимит корзины и т.п.) не
+                # останавливают перенос остальных. Неожиданные ошибки
+                # (БД, программные) пробрасываются и откатывают операцию.
                 logger.warning(
                     'wishlist_move_to_cart_skip',
                     extra={

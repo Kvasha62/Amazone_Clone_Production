@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 from decimal import Decimal
+from unittest import mock
 
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -294,6 +295,27 @@ class WebhookOrderConfirmationRecoveryTests(TestCase):
                 event_type=PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
             ).exists(),
         )
+
+    @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
+    def test_unexpected_close_payment_failure_propagates(self):
+        """F-17: closing a payment must not mask unexpected errors as 200."""
+        order, variant = _make_order_with_item(quantity=5, stock_quantity=2)
+        Order.objects.filter(pk=order.pk).update(
+            status=OrderStatus.CANCELLED,
+        )
+        payment = create_test_payment(
+            order,
+            order.user,
+            status=PAYMENT_STATUS_PROCESSING,
+        )
+
+        with mock.patch.object(
+            PaymentService,
+            'fail_payment',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._post_signed(payment)
 
     @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
     def test_retry_after_restock_succeeds(self):

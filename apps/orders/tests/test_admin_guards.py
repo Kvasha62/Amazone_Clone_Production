@@ -14,6 +14,7 @@ retained authoritative action path.
 """
 
 from decimal import Decimal
+from unittest import mock
 
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
@@ -21,6 +22,7 @@ from django.core.exceptions import PermissionDenied
 from django.db import connection
 from django.test import RequestFactory, TestCase
 from django.test.utils import CaptureQueriesContext
+from rest_framework.exceptions import ValidationError
 
 from apps.orders.admin.order_admin import (
     ORDER_ADMIN_PROTECTED_FIELDS,
@@ -313,3 +315,53 @@ class OrderAdminAuthoritativeActionTests(OrderAdminGuardTestCase):
             self.order, OrderStatus.PROCESSING, user=self.staff,
         )
         self.assertEqual(transitioned.status, OrderStatus.PROCESSING)
+
+    def test_confirm_selected_handles_domain_validation_error(self):
+        """Expected domain errors keep the admin batch action alive."""
+        with mock.patch(
+            'apps.orders.services.order_service.OrderService.confirm',
+            side_effect=ValidationError({'detail': 'cannot confirm'}),
+        ):
+            self.admin.confirm_selected(
+                self.request,
+                Order.objects.filter(pk=self.order.pk),
+            )
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.PENDING)
+
+    def test_confirm_selected_propagates_unexpected_service_error(self):
+        """Unexpected service failures are not silently converted to success."""
+        with mock.patch(
+            'apps.orders.services.order_service.OrderService.confirm',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.admin.confirm_selected(
+                    self.request,
+                    Order.objects.filter(pk=self.order.pk),
+                )
+
+    def test_cancel_selected_handles_domain_validation_error(self):
+        """Expected domain errors keep the admin batch action alive."""
+        with mock.patch(
+            'apps.orders.services.order_service.OrderService.cancel',
+            side_effect=ValidationError({'detail': 'cannot cancel'}),
+        ):
+            self.admin.cancel_selected(
+                self.request,
+                Order.objects.filter(pk=self.order.pk),
+            )
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.PENDING)
+
+    def test_cancel_selected_propagates_unexpected_service_error(self):
+        """Unexpected service failures are not silently converted to success."""
+        with mock.patch(
+            'apps.orders.services.order_service.OrderService.cancel',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.admin.cancel_selected(
+                    self.request,
+                    Order.objects.filter(pk=self.order.pk),
+                )

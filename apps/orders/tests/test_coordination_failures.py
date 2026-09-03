@@ -13,6 +13,7 @@
 
 import json
 from decimal import Decimal
+from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -325,3 +326,47 @@ class ReconcileOrderCoordinationCommandTests(TransactionTestCase):
         self.assertIn('inventory_actions', report)
         self.assertIn('payment_reconciliations', report)
         self.assertIn('errors', report)
+
+    def test_expected_domain_error_is_reported(self):
+        """Domain/not-found/DB failures remain visible in the report."""
+        order, variant = _make_order_with_item(quantity=5)
+        Order.objects.filter(pk=order.pk).update(
+            status=OrderStatus.DELIVERED,
+        )
+
+        out = StringIO()
+        with patch(
+            'apps.orders.management.commands.'
+            'reconcile_order_coordination.InventoryService.reconcile_order',
+            side_effect=ValidationError({'detail': 'cannot reconcile'}),
+        ):
+            call_command(
+                'reconcile_order_coordination',
+                order.order_number,
+                '--json',
+                stdout=out,
+                stderr=StringIO(),
+            )
+
+        report = json.loads(out.getvalue())
+        self.assertEqual(report['errors'][0]['phase'], 'inventory')
+
+    def test_unexpected_error_propagates(self):
+        """Unexpected errors stop the command instead of producing success."""
+        order, variant = _make_order_with_item(quantity=5)
+        Order.objects.filter(pk=order.pk).update(
+            status=OrderStatus.DELIVERED,
+        )
+
+        with patch(
+            'apps.orders.management.commands.'
+            'reconcile_order_coordination.InventoryService.reconcile_order',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                call_command(
+                    'reconcile_order_coordination',
+                    order.order_number,
+                    stdout=StringIO(),
+                    stderr=StringIO(),
+                )

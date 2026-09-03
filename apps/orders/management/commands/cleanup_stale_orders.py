@@ -29,8 +29,10 @@
 
 from datetime import timedelta
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.core.management.base import BaseCommand
 from django.utils import timezone
+from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.orders.constants import ORDER_PENDING_TTL_HOURS
 from apps.orders.models import Order
@@ -155,8 +157,11 @@ class Command(BaseCommand):
                     f'  ✓ {order.order_number} — отменён'
                 )
                 cancelled += 1
-            except Exception as exc:
-                # Логируем ошибку, но продолжаем с остальными.
+            except (ValidationError, NotFound, ObjectDoesNotExist) as exc:
+                # Ожидаемые доменные/not-found сбои одного заказа не должны
+                # останавливать обработку остальных. Прочие ошибки (БД,
+                # программные) НЕ глотаются: команда падает с видимым
+                # traceback, а не завершается "успехом" с неполным результатом.
                 self.stderr.write(
                     f'  ✗ {order.order_number} — ошибка: {exc}'
                 )
