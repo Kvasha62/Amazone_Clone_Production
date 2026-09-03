@@ -52,6 +52,10 @@ app.conf.update(
     # Ограничение concurrent задач
     worker_concurrency=4,
 
+    # Django owns the structured stdout/stderr handlers.  Do not let a Celery
+    # worker replace them with a second root logger configuration.
+    worker_hijack_root_logger=False,
+
     # Retry:Backoff
     task_default_retry_delay=30,  # секунд между retry
     task_max_retries=5,
@@ -63,6 +67,10 @@ app.conf.update(
         'apps.reviews.tasks.*': {'queue': 'reviews'},
     },
 )
+
+# PROD-027 / F-19: register request-context propagation and task lifecycle
+# hooks using Celery's built-in signals.  The module logs no task args/results.
+from apps.core import celery_observability as _celery_observability  # noqa: E402,F401
 
 # Автообнаружение: Celery ищет tasks.py во всех Django-apps
 app.autodiscover_tasks()

@@ -61,4 +61,5 @@ CMD ["gunicorn", "config.wsgi:application", \
      "--max-requests-jitter", "50", \
      "--forwarded-allow-ips", "*", \
      "--access-logfile", "-", \
+     "--access-logformat", "%(m)s %(U)s %(s)s %(D)sus request_id=%({X-Request-ID}i)s", \
      "--error-logfile", "-"]
