@@ -1,4 +1,119 @@
-# Production Baseline — PROD-019
+# Production Baseline — PROD-021
+
+## Approved baseline commit
+
+| Field | Value |
+|---|---|
+| Repository | `Kvasha62/Amazone_Clone_Production` |
+| Branch | `main` |
+| Approved baseline SHA | `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` |
+| Baseline commit title | `Merge pull request #42 from Kvasha62/arena/01a065cb-amazone-clone-production` |
+| Baseline commit parents | `411177cf772f680568f014c02fde4bf3ed0bc863` (`main` after the PROD-020 governance advance / PR #40) and `053d84fcb3b697a240cc4128f70afa33a7d123b6` (final HEAD of PR #42) |
+| CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run #64 / ID `33730756889` (event `push`, branch `main`, attempt 1), job/check `ci` (ID `100569893578`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; every job step succeeded — `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks` (`python manage.py check --fail-level WARNING`), `Migration check` (`makemigrations --check --dry-run` → no changes), `Apply migrations` (`migrate --noinput`), `Run tests` (full PostgreSQL 18 test suite, Django 6.1.1), and all post/cleanup steps; run started 2026-09-03T07:57:13Z, completed 2026-09-03T08:00:35Z |
+| Approved on | 2026-09-03 |
+| Ticket | PROD-022 |
+
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` is the authoritative production
+state: it is the merge commit of completed PROD-021 (PR #42), and its
+first-parent history contains the merge commit of the PROD-020 governance
+advance (PR #40, `411177cf772f680568f014c02fde4bf3ed0bc863`) on top of the
+previous baseline `fb29effb889e2589244b50751f1bcd4ee38ae116`.
+Earlier baseline records are preserved below as history.
+
+## Verification performed (read-only)
+
+1. GitHub `main` (REST API `branches/main`), `git ls-remote origin refs/heads/main`, local `main`, and `origin/main` all resolve to `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` — an exact match with the new production baseline SHA (verified 2026-09-03).
+2. `main` is exactly 4 commits ahead of and 0 commits behind the previous baseline `fb29effb889e2589244b50751f1bcd4ee38ae116` (`compare/fb29effb...0fb5079`): `fa312f72ce34c5996d70596ad240df586f3d4c12` + merge `411177cf772f680568f014c02fde4bf3ed0bc863` (PROD-020 / PR #40, docs-only governance advance), `053d84fcb3b697a240cc4128f70afa33a7d123b6` + merge `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` (PROD-021 / PR #42). Nothing else has landed on `main` since the previous baseline.
+3. GitHub Actions workflow `CI`, run #64 / ID `33730756889`: `head_sha` = `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` (exact match), event `push`, branch `main`, `run_attempt` 1, status `completed`, conclusion `success`, started 2026-09-03T07:57:13Z, completed 2026-09-03T08:00:35Z; job `ci` (ID `100569893578`) is `completed` / `success`. It is the only check run registered on the baseline SHA.
+4. Every CI job step succeeded on the baseline SHA: `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks` (`python manage.py check --fail-level WARNING`), `Migration check` (`python manage.py makemigrations --check --dry-run`), `Apply migrations` (`migrate --noinput`), `Run tests` (`python manage.py test --verbosity 2`, full PostgreSQL 18 test suite, Django 6.1.1), and all post/cleanup steps concluded `success`.
+5. PROD-021 / PR #42 is `MERGED` / completed (merged 2026-09-03T07:57:10Z); its merge commit is exactly the baseline SHA `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f`. CI on its final PR HEAD `053d84fcb3b697a240cc4128f70afa33a7d123b6` was green (run #63 / ID `33720995715`, check `ci` ID `100539928695` — `completed` / `success`, 2026-09-03T05:56:29Z→05:59:52Z).
+6. PROD-020 / PR #40 (the governance advance that recorded the previous baseline) is `MERGED` / completed (merged 2026-09-03T05:27:49Z); its merge commit is `411177cf772f680568f014c02fde4bf3ed0bc863` (first parent of the baseline SHA). CI on that merge commit is green (run #62 / ID `33718949417`, check `ci` ID `100533940584` — `completed` / `success`, 2026-09-03T05:27:51Z→05:31:25Z).
+7. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+8. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-022 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-022 — Advance production baseline after PROD-021 (Issue #43) |
+| Status | Documentation-only governance change; pending Architect review and Owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `fb29effb889e2589244b50751f1bcd4ee38ae116` → `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` (`main`) |
+| Completed production change | PROD-021 / PR #42 — merged 2026-09-03T07:57:10Z |
+| Intermediate governance merge in range | PROD-020 / PR #40 — merged 2026-09-03T05:27:49Z (docs-only; merge commit `411177cf772f680568f014c02fde4bf3ed0bc863`; CI run #62 / ID `33718949417`, check `ci` ID `100533940584` — `completed` / `success`) |
+| Verified on | 2026-09-03 |
+
+### Completion record — PROD-021 / PR #42 (merged)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-021 — Make analytics ProductView deduplication concurrency-safe (F-22) (Issue #41) |
+| Status | ✅ MERGED / completed on 2026-09-03T07:57:10Z — not in review, not open |
+| Pull request | #42 (`Kvasha62/Amazone_Clone_Production`) — `PROD-021: Make analytics ProductView deduplication concurrency-safe (F-22)` — MERGED |
+| Branch | `arena/01a065cb-amazone-clone-production` |
+| Commits | `053d84fcb3b697a240cc4128f70afa33a7d123b6` — `PROD-021: make ProductView deduplication concurrency-safe (F-22)` (final PR HEAD) |
+| CI on final PR HEAD | ✅ green — GitHub Actions run #63 / ID `33720995715`, check run `ci` ID `100539928695` — `completed` / `success` (2026-09-03T05:59:52Z) |
+| Merge commit on `main` | `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` — `Merge pull request #42 from Kvasha62/arena/01a065cb-amazone-clone-production` — **the new baseline SHA** |
+| CI on merge commit | ✅ green — GitHub Actions run #64 / ID `33730756889`, check run `ci` ID `100569893578` — `completed` / `success` |
+| Files changed | `apps/analytics/locks.py` (new), `apps/analytics/services/analytics_service.py`, `apps/analytics/tests/test_locks.py` (new), `apps/analytics/tests/test_product_view_concurrency.py` (new), `ARCHITECTURE.md` |
+
+Scope of PROD-021 (closed audit finding F-22):
+`AnalyticsService.record_view()` is `SELECT EXISTS(...)` → `INSERT` →
+`UPDATE views_count` inside `transaction.atomic()`, which on PostgreSQL
+`READ COMMITTED` gives atomicity but not isolation against this
+check-then-insert pattern: two concurrent transactions for the same
+deduplication identity both observed `exists() == False`, both inserted, and
+`Product.views_count` was incremented twice. The fix serializes the
+check-then-insert per identity: before the existence check, inside the
+existing `transaction.atomic()`, it takes
+`pg_advisory_xact_lock(bigint)` on a deterministic key derived from the
+identity (new `apps/analytics/locks.py`: `dedup_identity()`,
+`blake2b`-derived lock key — not `hash()`, because `PYTHONHASHSEED`
+randomization would give different gunicorn workers different keys — and
+`acquire_dedup_lock()`). Deduplication identity semantics are unchanged:
+authenticated `(product, user)`, anonymous `(product, session_key)`, neither
+user nor session → deduplication not applicable, sliding one-hour window.
+The lock is released automatically on COMMIT or ROLLBACK, serializes only
+competitors for the same key (different products/users/sessions never block
+each other), is independent of application timing, and requires no schema
+change (a `UNIQUE` / partial `UniqueConstraint` was rejected because the
+invariant is a sliding window, not a deterministic function of a row). On
+non-PostgreSQL backends (SQLite dev only) the lock is a no-op with a warning,
+so production guarantees are not weakened. `Product.views_count` is
+incremented only on the path that actually inserts a `ProductView`
+(deduplicated racers return before the insert), so the counter grows by
+exactly 1 per recorded view. New tests: 8 cross-connection PostgreSQL
+concurrency regression tests (`apps/analytics/tests/test_product_view_concurrency.py`
+— `TransactionTestCase`, barrier start, one DB connection per thread; with
+the fix disabled the suite fails exactly on the single-view invariant, with
+it in place all 71 analytics tests pass) and 8 identity/lock-key semantics
+tests (`apps/analytics/tests/test_locks.py`). `ARCHITECTURE.md` adds one row
+to the existing concurrency-protection table documenting the implemented
+decision. API is unchanged. Models are unchanged. Migrations are unchanged
+(`makemigrations --check --dry-run` → `No changes detected`). CI/deployment
+configuration is unchanged. The educational repository
+`Kvasha62/Amazone_Clone` was not touched.
+
+PROD-021 is recorded as completed/merged via PR #42 and is part of the verified
+`main` state at the new baseline SHA. This pull request (PROD-022) is a
+docs-only governance change that modifies only
+`docs/production/PRODUCTION_BASELINE.md`; it does not change source code, API,
+models, migrations, dependencies, CI, deployment configuration, or the
+educational repository `Kvasha62/Amazone_Clone`, and it does not remediate any
+audit finding — all remaining audit findings are outside this ticket and
+remain unchanged. Architect review is required before the Owner performs the
+final merge; the Architect/Assistant must not merge this governance pull
+request.
+
+## Historical baseline record — PROD-019 (superseded)
+
+This record was current immediately before PROD-022. It is preserved for audit
+and is now superseded by the approved baseline at the top of this document.
 
 ## Approved baseline commit
 
@@ -36,13 +151,13 @@ Earlier baseline records are preserved below as history.
 7. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
 8. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
 
-## Baseline advance — PROD-020 (this document)
+## Baseline advance — PROD-020 (merged via PR #40; record preserved)
 
 | Field | Value |
 |---|---|
 | Ticket | PROD-020 — Advance production baseline after PROD-019 (Issue #39) |
-| Status | Documentation-only governance change; pending Architect review and Owner merge |
-| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Status | Documentation-only governance change; MERGED / completed via PR #40 (merge commit `411177cf772f680568f014c02fde4bf3ed0bc863`, merged 2026-09-03T05:27:49Z) |
+| Change class | That pull request changed only `docs/production/PRODUCTION_BASELINE.md` |
 | Advance | Previous baseline `161639cd0ff929923c50b54d78c125a1e95ed931` → `fb29effb889e2589244b50751f1bcd4ee38ae116` (`main`) |
 | Completed production change | PROD-019 / PR #38 — merged 2026-09-03T05:13:38Z |
 | Intermediate governance merge in range | PROD-018 / PR #36 — merged 2026-09-03T04:37:01Z (docs-only; merge commit `ef47ceccd6eaf7d4054396ed4f22a38b4f705c2b`; CI run #58 / ID `33715701364`, check `ci` ID `100524314514` — `completed` / `success`) |
