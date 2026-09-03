@@ -17,7 +17,7 @@ import logging
 from io import StringIO
 from unittest import mock
 
-from kombu.exceptions import OperationalError as KombuOperationalError
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from django.contrib.auth.tokens import default_token_generator
 from django.test import TestCase, override_settings
@@ -44,7 +44,12 @@ class PasswordResetRequestTests(TestCase):
     @override_settings(EMAIL_BACKEND='django.core.mail.backends.console.EmailBackend')
     def test_reset_request_existing_user(self):
         """Reset request for existing user → 200."""
-        resp = self.client.post(self.url, {'email': 'reset@example.com'}, format='json')
+        with mock.patch(
+            'apps.notifications.tasks.send_password_reset_email.delay',
+        ):
+            resp = self.client.post(
+                self.url, {'email': 'reset@example.com'}, format='json',
+            )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('существует', resp.data['detail'])
 
@@ -60,10 +65,12 @@ class PasswordResetRequestTests(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_broker_failure_falls_back_to_sync(self):
-        """F-17: expected Celery/broker failures keep the sync fallback."""
+        """F-17: expected Celery/Redis broker failures keep the sync fallback."""
         with mock.patch(
             'apps.notifications.tasks.send_password_reset_email.delay',
-            side_effect=KombuOperationalError('broker is down'),
+            side_effect=RedisConnectionError(
+                'Error 111 connecting to broker. Connection refused.',
+            ),
         ), mock.patch.object(
             PasswordResetRequestView,
             '_send_reset_email_sync',
@@ -78,12 +85,12 @@ class PasswordResetRequestTests(TestCase):
         sync_send.assert_called_once()
 
     def test_unexpected_celery_error_not_masked(self):
-        """F-17: programming failures must not silently fall back to sync."""
+        """F-17: arbitrary RuntimeError/programming failures must propagate."""
         with mock.patch(
             'apps.notifications.tasks.send_password_reset_email.delay',
-            side_effect=TypeError('bad task call (wrong signature)'),
+            side_effect=RuntimeError('unexpected programming error'),
         ):
-            with self.assertRaises(TypeError):
+            with self.assertRaises(RuntimeError):
                 self.client.post(
                     self.url,
                     {'email': 'reset@example.com'},
@@ -187,7 +194,12 @@ class PasswordResetLoggingTests(TestCase):
 
         try:
             url = reverse('users:password-reset')
-            self.client.post(url, {'email': 'logtest@example.com'}, format='json')
+            with mock.patch(
+                'apps.notifications.tasks.send_password_reset_email.delay',
+            ):
+                self.client.post(
+                    url, {'email': 'logtest@example.com'}, format='json',
+                )
 
             log_output = log_stream.getvalue()
             # Token should NOT appear in logs

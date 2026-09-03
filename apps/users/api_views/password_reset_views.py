@@ -33,8 +33,10 @@ except ImportError:  # pragma: no cover - optional Celery dependency
 
 try:
     from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
 except ImportError:  # pragma: no cover - optional Redis dependency
     RedisConnectionError = None
+    RedisTimeoutError = None
 
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_str
@@ -56,19 +58,23 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Expected async/broker failures that trigger the synchronous email fallback.
-# RuntimeError is the exception Celery/kombu raises when the broker cannot be
-# reached and the enqueue retry limit is exceeded (Redis is not a dependency
-# of the request path). It is intentional to keep the existing sync fallback.
-_CELERY_FALLBACK_ERRORS = (ImportError, ConnectionError, RuntimeError)
+# Expected infrastructure failures that trigger the synchronous email
+# fallback. These are the concrete exceptions raised by the async enqueue /
+# broker layer when Celery or its Redis transport is unavailable: missing
+# optional dependencies (ImportError), OS-level connection failures
+# (built-in ConnectionError), kombu transport failures
+# (kombu.exceptions.OperationalError), and Redis client connection/timeout
+# failures (redis.exceptions.*). RuntimeError is deliberately NOT included:
+# Celery may wrap underlying broker failures in a broad RuntimeError, which
+# is a generic programming-prone exception and must propagate to the API
+# error boundary instead of being silently turned into sync email.
+_CELERY_FALLBACK_ERRORS = (ImportError, ConnectionError)
 if KombuOperationalError is not None:
-    _CELERY_FALLBACK_ERRORS = _CELERY_FALLBACK_ERRORS + (
-        KombuOperationalError,
-    )
+    _CELERY_FALLBACK_ERRORS += (KombuOperationalError,)
 if RedisConnectionError is not None:
-    _CELERY_FALLBACK_ERRORS = _CELERY_FALLBACK_ERRORS + (
-        RedisConnectionError,
-    )
+    _CELERY_FALLBACK_ERRORS += (RedisConnectionError,)
+if RedisTimeoutError is not None:
+    _CELERY_FALLBACK_ERRORS += (RedisTimeoutError,)
 
 
 # ── Serializers ─────────────────────────────────────────────
