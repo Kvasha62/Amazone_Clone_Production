@@ -16,6 +16,7 @@
 # ────────────────────────────────────────────────────────────────────────
 
 from django.contrib import admin
+from django.core.exceptions import PermissionDenied
 
 from apps.payments.models import Payment, PaymentEvent
 
@@ -143,6 +144,27 @@ class PaymentAdmin(admin.ModelAdmin):
     list_per_page = 50
 
     ordering = ('-created_at',)
+
+    # ── PROD-031 / F-24: удаление Payment через Admin запрещено ────────
+    # PaymentEvent.payment использует on_delete=CASCADE, поэтому удаление
+    # Payment уничтожило бы append-only аудит-историю PaymentEvent.
+    # Блокируем все административные пути удаления: одиночное, массовое
+    # (bulk action) и любой вызов delete_model / delete_queryset.
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def delete_model(self, request, obj):
+        raise PermissionDenied(
+            'Удаление Payment через Admin запрещено (PROD-031 / F-24): '
+            'это уничтожило бы аудит-историю PaymentEvent.'
+        )
+
+    def delete_queryset(self, request, queryset):
+        raise PermissionDenied(
+            'Массовое удаление Payment через Admin запрещено '
+            '(PROD-031 / F-24): это уничтожило бы аудит-историю PaymentEvent.'
+        )
 
 
 @admin.register(PaymentEvent)
