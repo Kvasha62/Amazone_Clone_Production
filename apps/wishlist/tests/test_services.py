@@ -1,5 +1,8 @@
+from unittest import mock
+
 from django.test import TestCase
 from rest_framework.exceptions import NotFound, ValidationError
+from apps.cart.services.cart_service import CartService
 from apps.orders.tests.factories import create_test_user
 from apps.catalog.tests.factories import CatalogTestCase
 from apps.wishlist.models import Wishlist, WishlistItem
@@ -160,3 +163,48 @@ class MoveToCartTests(CatalogTestCase):
     def test_move_no_args_raises(self):
         with self.assertRaises(ValidationError):
             WishlistService.move_to_cart(self.user)
+
+    def test_move_skips_domain_error_and_continues(self):
+        """Expected per-item domain failures don't stop the batch move."""
+        item1 = self.item  # already created in setUp with variant_128
+        item2 = create_test_wishlist_item(self.wl, self.variant_256)
+        self.wl.items_count = 2
+        self.wl.save()
+
+        def _add_item_side_effect(cart, variant_id, quantity):
+            if variant_id == self.variant_128.pk:
+                raise ValidationError({'detail': 'stock insufficient'})
+            return None
+
+        with mock.patch.object(
+            CartService,
+            'add_item',
+            side_effect=_add_item_side_effect,
+        ):
+            moved = WishlistService.move_to_cart(
+                self.user,
+                item_ids=[item1.pk, item2.pk],
+            )
+
+        self.assertEqual(moved, 1)
+        self.assertTrue(WishlistItem.objects.filter(pk=item1.pk).exists())
+        self.assertFalse(WishlistItem.objects.filter(pk=item2.pk).exists())
+
+    def test_move_unexpected_error_propagates(self):
+        """Unexpected programming/DB failures are not converted to partial success."""
+        unexpected = self.item  # already created in setUp with variant_128
+        self.wl.items_count = 1
+        self.wl.save()
+
+        with mock.patch.object(
+            CartService,
+            'add_item',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                WishlistService.move_to_cart(
+                    self.user,
+                    item_ids=[unexpected.pk],
+                )
+
+        self.assertTrue(WishlistItem.objects.filter(pk=unexpected.pk).exists())

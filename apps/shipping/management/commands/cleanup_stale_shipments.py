@@ -86,25 +86,19 @@ class Command(BaseCommand):
 
         updated = 0
         for shipment in stale:
-            try:
-                shipment.status = 'returned'
-                shipment.save(update_fields=['status', 'updated_at'])
-                updated += 1
-                logger.info(
-                    'stale_shipment_returned',
-                    extra={
-                        'shipment_id': shipment.pk,
-                        'internal_tracking': shipment.internal_tracking,
-                    },
-                )
-            except Exception as exc:
-                logger.error(
-                    'stale_shipment_error',
-                    extra={
-                        'shipment_id': shipment.pk,
-                        'error': str(exc),
-                    },
-                )
+            # Сохранение схемы не имеет ожидаемых доменных исключений.
+            # Ошибки БД/программные ошибки не должны превращаться в
+            # «успешный» отчёт команды — они пробрасываются наружу.
+            shipment.status = 'returned'
+            shipment.save(update_fields=['status', 'updated_at'])
+            updated += 1
+            logger.info(
+                'stale_shipment_returned',
+                extra={
+                    'shipment_id': shipment.pk,
+                    'internal_tracking': shipment.internal_tracking,
+                },
+            )
 
         self.stdout.write(
             self.style.SUCCESS(

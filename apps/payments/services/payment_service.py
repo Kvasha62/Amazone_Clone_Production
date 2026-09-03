@@ -25,7 +25,8 @@ import logging
 import uuid
 from decimal import Decimal
 
-from django.db import models, transaction
+from django.core.exceptions import ObjectDoesNotExist
+from django.db import Error, models, transaction
 from django.utils import timezone
 
 from rest_framework.exceptions import NotFound, ValidationError
@@ -1062,7 +1063,10 @@ class PaymentService:
 
         try:
             return Order.objects.only('status').get(pk=order_id).status
-        except Exception:  # noqa: BLE001 — probe; caller classifies.
+        except (ObjectDoesNotExist, Error):
+            # Probe: only-not-found and DB-layer failures are classified by
+            # the caller. Unexpected programming errors are not converted to
+            # 'None' (which would look like a DB failure).
             return None
 
     @staticmethod
@@ -1192,10 +1196,11 @@ class PaymentService:
         📖 https://en.wikipedia.org/wiki/Idempotence
         """
         # ── Ищем платёж по external_id ──
-        try:
-            payment = Payment.objects.with_external_id(external_id).first()
-        except Exception:
-            payment = None
+        # `with_external_id().first()` не имеет ожидаемых доменных
+        # исключений; отсутствие платежа — это `None`. Ошибки БД и
+        # программные ошибки НЕ превращаются в "не найдено", иначе
+        # провайдер получил бы 200 без повторной доставки события.
+        payment = Payment.objects.with_external_id(external_id).first()
 
         if payment is None:
             logger.warning(

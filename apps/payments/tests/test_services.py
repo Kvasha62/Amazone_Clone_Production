@@ -13,7 +13,9 @@
 # ────────────────────────────────────────────────────────────────────────
 
 from decimal import Decimal
+from unittest import mock
 
+from django.db import OperationalError
 from django.test import TestCase
 
 from rest_framework.exceptions import NotFound, ValidationError
@@ -458,6 +460,29 @@ class HandleWebhookServiceTests(TestCase):
                 event_type='webhook_received',
             ).exists()
         )
+
+    def test_webhook_database_lookup_error_propagates(self):
+        """F-17: DB failure must not be converted into 'payment not found'."""
+        with mock.patch(
+            'apps.payments.querysets.payment_queryset.'
+            'PaymentQuerySet.with_external_id',
+            side_effect=OperationalError('database is down'),
+        ):
+            with self.assertRaises(OperationalError):
+                PaymentService.handle_webhook(
+                    external_id=self.payment.external_id,
+                    event_type='payment.succeeded',
+                    status=PAYMENT_STATUS_SUCCEEDED,
+                )
+
+    def test_fresh_order_status_propagates_programming_error(self):
+        """F-17: `_fresh_order_status` must not hide programming errors."""
+        with mock.patch(
+            'apps.orders.models.Order.objects.only',
+            side_effect=RuntimeError('boom'),
+        ):
+            with self.assertRaises(RuntimeError):
+                PaymentService._fresh_order_status(999)
 
 
 class GetPaymentByNumberTests(TestCase):

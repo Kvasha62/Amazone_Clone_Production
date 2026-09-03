@@ -26,6 +26,18 @@
 
 import logging
 
+try:
+    from kombu.exceptions import OperationalError as KombuOperationalError
+except ImportError:  # pragma: no cover - optional Celery dependency
+    KombuOperationalError = None
+
+try:
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+except ImportError:  # pragma: no cover - optional Redis dependency
+    RedisConnectionError = None
+    RedisTimeoutError = None
+
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
@@ -45,6 +57,24 @@ except ImportError:
         return decorator
 
 logger = logging.getLogger(__name__)
+
+# Expected infrastructure failures that trigger the synchronous email
+# fallback. These are the concrete exceptions raised by the async enqueue /
+# broker layer when Celery or its Redis transport is unavailable: missing
+# optional dependencies (ImportError), OS-level connection failures
+# (built-in ConnectionError), kombu transport failures
+# (kombu.exceptions.OperationalError), and Redis client connection/timeout
+# failures (redis.exceptions.*). RuntimeError is deliberately NOT included:
+# Celery may wrap underlying broker failures in a broad RuntimeError, which
+# is a generic programming-prone exception and must propagate to the API
+# error boundary instead of being silently turned into sync email.
+_CELERY_FALLBACK_ERRORS = (ImportError, ConnectionError)
+if KombuOperationalError is not None:
+    _CELERY_FALLBACK_ERRORS += (KombuOperationalError,)
+if RedisConnectionError is not None:
+    _CELERY_FALLBACK_ERRORS += (RedisConnectionError,)
+if RedisTimeoutError is not None:
+    _CELERY_FALLBACK_ERRORS += (RedisTimeoutError,)
 
 
 # ── Serializers ─────────────────────────────────────────────
@@ -111,8 +141,11 @@ class PasswordResetRequestView(APIView):
             try:
                 from apps.notifications.tasks import send_password_reset_email
                 send_password_reset_email.delay(user.pk, uid, token)
-            except Exception:
-                # Celery не доступен — отправляем синхронно
+            except _CELERY_FALLBACK_ERRORS:
+                # Ожидаемые сбои Celery/брокера (модуль недоступен или
+                # брокер не отвечает) → синхронный fallback. Программные
+                # ошибки (например, неверная сигнатура задачи) намеренно
+                # пробрасываются, чтобы не маскировать проблему под 200.
                 self._send_reset_email_sync(user, uid, token)
 
             # 🔴 НЕ логируем token, uid, или ссылку с токеном

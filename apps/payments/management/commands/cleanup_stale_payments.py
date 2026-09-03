@@ -21,8 +21,10 @@
 
 import json as json_module
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.core.management.base import BaseCommand
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 
 from apps.payments.constants import PAYMENT_PENDING_TTL_HOURS, PAYMENT_STATUS_PENDING
 from apps.payments.models import Payment
@@ -93,7 +95,10 @@ class Command(BaseCommand):
                         'id': payment.pk,
                         'order_number': payment.order_number,
                     })
-                except Exception as exc:
+                except (ValidationError, ObjectDoesNotExist) as exc:
+                    # Ожидаемые доменные/not-found сбои одного платежа
+                    # логируются и не останавливают обработку остальных.
+                    # Неожиданные ошибки (БД, программные) пробрасываются.
                     self.stderr.write(
                         f'Ошибка отмены платежа {payment.order_number}: {exc}'
                     )

@@ -233,7 +233,7 @@ class CartSerializer(serializers.ModelSerializer):
     @staticmethod
     def _get_items(obj: Cart):
         """
-        Безопасное извлечение prefetched-списка.
+        Извлечение items для сериализации.
 
         КАК РАБОТАЕТ PREFETCH CACHE:
           Cart.objects.with_items().get(pk=1) →
@@ -248,11 +248,9 @@ class CartSerializer(serializers.ModelSerializer):
           prefetch есть → из кэша (быстро)
           prefetch нет → SQL (медленно, но не падает)
 
+        SQL/программные ошибки НЕ глотаются: они должны достичь
+        существующего error boundary API.
+
         📖 https://docs.djangoproject.com/en/stable/ref/models/querysets/#prefetch-related
         """
-        try:
-            # prefetched — возвращает list без SQL
-            return obj.items.all()
-        except Exception:
-            # Fallback — если что-то пошло не так (маловероятно)
-            return obj.items.all()
+        return obj.items.all()

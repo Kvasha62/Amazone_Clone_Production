@@ -25,7 +25,10 @@
 
 import json as json_module
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.core.management.base import BaseCommand
+from django.db import DatabaseError
+from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.inventory.services.inventory_service import InventoryService
 from apps.orders.models import Order
@@ -87,7 +90,15 @@ class Command(BaseCommand):
                 inventory_report = InventoryService.reconcile_order(order)
                 if inventory_report['actions']:
                     report['inventory_actions'].append(inventory_report)
-            except Exception as exc:  # noqa: BLE001 — отчёт, не молчание.
+            except (
+                ValidationError,
+                NotFound,
+                ObjectDoesNotExist,
+                DatabaseError,
+            ) as exc:
+                # Ожидаемые доменные/not-found/DB сбои одной стороны
+                # фиксируются в отчёте; неожиданные программные ошибки
+                # намеренно пробрасываются и останавливают команду.
                 report['errors'].append({
                     'order_number': order.order_number,
                     'phase': 'inventory',
@@ -110,7 +121,15 @@ class Command(BaseCommand):
                         'order_number': order.order_number,
                         'outcome': outcome,
                     })
-            except Exception as exc:  # noqa: BLE001 — отчёт, не молчание.
+            except (
+                ValidationError,
+                NotFound,
+                ObjectDoesNotExist,
+                DatabaseError,
+            ) as exc:
+                # Ожидаемые доменные/not-found/DB сбои одной стороны
+                # фиксируются в отчёте; неожиданные программные ошибки
+                # намеренно пробрасываются и останавливают команду.
                 report['errors'].append({
                     'order_number': order.order_number,
                     'phase': 'payment',

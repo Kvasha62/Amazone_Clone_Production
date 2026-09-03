@@ -2,13 +2,15 @@
 Тесты API endpoints каталога.
 """
 from decimal import Decimal
+from unittest import mock
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from apps.catalog.api_views.product_brief_views import ProductBySlugsView
 from apps.catalog.constants import ProductStatus
 from apps.catalog.models import (
     Brand,
@@ -120,6 +122,41 @@ class ProductListAPITests(CatalogAPITestCase):
         resp = self.client.get('/api/v1/catalog/products/')
         ids = [p['id'] for p in resp.data['results']]
         self.assertNotIn(str(draft.uuid), ids)
+
+
+# ==========================================================
+# PRODUCT BY SLUGS (recently viewed)
+# ==========================================================
+
+class ProductBySlugsAPITests(CatalogAPITestCase):
+    """F-17: product-brief lookup must not swallow unexpected errors."""
+
+    def test_by_slugs_returns_matching_product(self):
+        resp = self.client.get(
+            '/api/v1/catalog/products/by-slugs/',
+            {'slugs': self.product.slug},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['slug'], self.product.slug)
+
+    def test_empty_slugs_returns_empty_list(self):
+        resp = self.client.get('/api/v1/catalog/products/by-slugs/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, [])
+
+    def test_unexpected_query_error_propagates(self):
+        request = RequestFactory().get(
+            '/api/v1/catalog/products/by-slugs/',
+            {'slugs': 'some-slug'},
+        )
+        with mock.patch(
+            'apps.catalog.querysets.product_queryset.'
+            'ProductQuerySet.with_related',
+            side_effect=RuntimeError('db query failed'),
+        ):
+            with self.assertRaises(RuntimeError):
+                ProductBySlugsView.as_view()(request)
 
 
 # ==========================================================

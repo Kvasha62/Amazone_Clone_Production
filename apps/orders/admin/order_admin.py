@@ -30,6 +30,8 @@
 # ────────────────────────────────────────────────────────────────────────
 
 from django.contrib import admin
+from django.core.exceptions import ObjectDoesNotExist
+from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.core.admin_guards import ProtectedFieldsAdminMixin
 from apps.orders.models import Order, OrderItem
@@ -227,7 +229,7 @@ class OrderAdmin(ProtectedFieldsAdminMixin, admin.ModelAdmin):
             try:
                 OrderService.confirm(order, user=request.user)
                 confirmed += 1
-            except Exception as e:
+            except (ValidationError, NotFound, ObjectDoesNotExist) as e:
                 self.message_user(
                     request,
                     f'Ошибка для {order.order_number}: {e}',
@@ -267,7 +269,7 @@ class OrderAdmin(ProtectedFieldsAdminMixin, admin.ModelAdmin):
                     user=request.user,
                 )
                 cancelled += 1
-            except Exception as e:
+            except (ValidationError, NotFound, ObjectDoesNotExist) as e:
                 self.message_user(
                     request,
                     f'Ошибка для {order.order_number}: {e}',
