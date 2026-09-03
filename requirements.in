@@ -1,0 +1,40 @@
+# Direct production dependencies for the AmazonClone backend.
+#
+# requirements.txt is the generated, fully pinned dependency set that is
+# authoritative for the production Docker image and CI.  This file lists the
+# direct (human-maintained) dependencies only; regenerate requirements.txt
+# after any change here, then commit both files together.
+#
+# Regeneration (dev-only tooling, not part of the runtime):
+#   uv pip compile --python-version 3.13 requirements.in -o requirements.txt
+# or:
+#   pip-compile requirements.in -o requirements.txt
+
+Django>=6.1,<7.0
+djangorestframework>=3.18
+djangorestframework-simplejwt>=5.3
+django-filter>=23.0
+drf-spectacular>=0.30
+django-cors-headers>=4.3
+
+# PostgreSQL adapter — psycopg3 (required by the canonical PostgreSQL runtime)
+psycopg[binary]>=3.3
+
+# Tree structure (Category hierarchy)
+django-treebeard>=4.7.1
+
+# .env support
+python-dotenv>=1.0
+
+# Production WSGI server
+gunicorn>=23.0
+
+# YAML deployment configuration parsing in tests
+PyYAML>=6.0
+
+# Pillow (ImageField for products, brands)
+Pillow>=10.0
+
+# Celery + Redis (background tasks)
+celery[redis]>=5.4
+redis>=5.0
