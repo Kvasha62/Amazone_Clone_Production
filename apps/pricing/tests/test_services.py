@@ -92,6 +92,53 @@ class RecalculateProductPricesTests(PricingTestCase):
         self.assertEqual(self.product.min_price, Decimal('200.00'))
         self.assertEqual(self.product.max_price, Decimal('300.00'))
 
+    def test_sale_price_affects_minimum(self):
+        PricingService.set_price(
+            self.variant_a, Decimal('1000.00'),
+            sale_price=Decimal('700.00'),
+        )
+        PricingService.set_price(self.variant_b, Decimal('1500.00'))
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.min_price, Decimal('700.00'))
+        self.assertEqual(self.product.max_price, Decimal('1500.00'))
+
+    def test_sale_price_affects_maximum(self):
+        PricingService.set_price(
+            self.variant_a, Decimal('1000.00'),
+            sale_price=Decimal('700.00'),
+        )
+        PricingService.set_price(
+            self.variant_b, Decimal('1500.00'),
+            sale_price=Decimal('1200.00'),
+        )
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.min_price, Decimal('700.00'))
+        self.assertEqual(self.product.max_price, Decimal('1200.00'))
+
+    def test_base_price_used_without_sale_price(self):
+        PricingService.set_price(self.variant_a, Decimal('1000.00'))
+
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.min_price, Decimal('1000.00'))
+        self.assertEqual(self.product.max_price, Decimal('1000.00'))
+
+    def test_sale_price_change_recalculates_bounds(self):
+        PricingService.set_price(
+            self.variant_a, Decimal('1000.00'),
+            sale_price=Decimal('900.00'),
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.min_price, Decimal('900.00'))
+
+        PricingService.set_price(
+            self.variant_a, Decimal('1000.00'),
+            sale_price=Decimal('700.00'),
+        )
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.min_price, Decimal('700.00'))
+
     def test_min_max_none_when_no_prices(self):
         """Нет цен → min_price = max_price = None."""
         self.product.refresh_from_db()
@@ -99,12 +146,16 @@ class RecalculateProductPricesTests(PricingTestCase):
         self.assertIsNone(self.product.max_price)
 
     def test_min_max_excludes_inactive_variants(self):
-        """Неактивные варианты не учитываются."""
+        """Неактивные варианты не учитываются, включая sale_price."""
         PricingService.set_price(self.variant_a, Decimal('100.00'))
-        PricingService.set_price(self.variant_inactive, Decimal('10.00'))
+        PricingService.set_price(
+            self.variant_inactive, Decimal('50.00'),
+            sale_price=Decimal('10.00'),
+        )
 
         self.product.refresh_from_db()
         self.assertEqual(self.product.min_price, Decimal('100.00'))
+        self.assertEqual(self.product.max_price, Decimal('100.00'))
 
     def test_single_price(self):
         """Один вариант с ценой — min = max."""

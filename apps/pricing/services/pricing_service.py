@@ -33,6 +33,8 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Max, Min
+from django.db.models.functions import Coalesce
 from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.catalog.models import Product
@@ -311,24 +313,23 @@ class PricingService:
 
         АЛГОРИТМ:
           1. Берём цены активных вариантов товара (variant.is_active=True).
-          2. min_price = MIN(price), max_price = MAX(price).
-          3. Если цены нет → (None, None).
+          2. effective_price = COALESCE(sale_price, price).
+          3. min_price = MIN(effective_price), max_price = MAX(effective_price).
+          4. Если цены нет → (None, None).
 
         ВАЖНО: только активные варианты участвуют в расчёте — неактивный
         вариант не виден в каталоге и не должен занижать/завышать цену.
         """
-        prices = (
+        bounds = (
             Price.objects
             .filter(variant__product=product, variant__is_active=True)
-            .values_list('price', flat=True)
+            .aggregate(
+                min_price=Min(Coalesce('sale_price', 'price')),
+                max_price=Max(Coalesce('sale_price', 'price')),
+            )
         )
-
-        if prices:
-            min_price = min(prices)
-            max_price = max(prices)
-        else:
-            min_price = None
-            max_price = None
+        min_price = bounds['min_price']
+        max_price = bounds['max_price']
 
         logger.debug(
             'product_price_bounds_computed',
