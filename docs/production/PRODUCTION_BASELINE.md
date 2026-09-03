@@ -1,4 +1,107 @@
-# Production Baseline — PROD-023
+# Production Baseline — PROD-025
+
+## Approved baseline commit
+
+| Field | Value |
+|---|---|
+| Repository | `Kvasha62/Amazone_Clone_Production` |
+| Branch | `main` |
+| Approved baseline SHA | `ac03048a86f852fa73431dd2411d26ef1f91405b` |
+| Baseline commit title | `Merge pull request #50 from Kvasha62/arena/01a066e9-amazone-clone-production` |
+| Baseline commit parents | `5924352babd90e84929e256f44772cebf81e5089` (`main` after the PROD-024 governance advance / PR #48) and `3fbd7a3c8d207db47b747ac516f8d66b593337ef` (final HEAD of PR #50) |
+| CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run #72 / ID `33752285990` (event `push`, branch `main`, attempt 1), job/check `ci` (ID `100638369138`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; every job step succeeded — `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks` (`python manage.py check --fail-level WARNING`), `Migration check` (`makemigrations --check --dry-run` → no changes), `Apply migrations` (`migrate --noinput`), `Run tests` (full PostgreSQL 18 test suite, Django 6.1.1), and all post/cleanup steps; run started 2026-09-03T11:54:55Z, job completed 2026-09-03T11:58:15Z, run completed 2026-09-03T11:58:16Z |
+| Approved on | 2026-09-03 |
+| Ticket | PROD-026 |
+
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`ac03048a86f852fa73431dd2411d26ef1f91405b` is the authoritative production
+state: it is the merge commit of completed PROD-025 / F-18 (PR #50), and its
+first-parent history contains the merge commit of the PROD-024 governance
+advance (PR #48, `5924352babd90e84929e256f44772cebf81e5089`) on top of the
+previous approved baseline `cb79892fc29b4c4f86b5881e6273924d96831d9a`.
+Earlier baseline records are preserved below as history.
+
+## Verification performed (read-only)
+
+1. PR #50 is `MERGED` (merged 2026-09-03T11:54:52Z by the Owner); the GitHub Pull Requests API and `gh pr view` both report merge commit `ac03048a86f852fa73431dd2411d26ef1f91405b` and final HEAD `3fbd7a3c8d207db47b747ac516f8d66b593337ef`.
+2. GitHub `main` (REST API `branches/main`), `git ls-remote origin refs/heads/main`, local `main`, and `origin/main` all resolve to `ac03048a86f852fa73431dd2411d26ef1f91405b` — an exact match with the new production baseline SHA (verified 2026-09-03). The GitHub commit API reports parents `5924352babd90e84929e256f44772cebf81e5089` and `3fbd7a3c8d207db47b747ac516f8d66b593337ef`, and the commit is reachable from `main` as its current tip.
+3. `main` is exactly 4 commits ahead of and 0 commits behind the previous baseline `cb79892fc29b4c4f86b5881e6273924d96831d9a` (`compare/cb79892...ac03048`): `c34227034c3940c313d2fa2139d0d9e98a015138` + merge `5924352babd90e84929e256f44772cebf81e5089` (PROD-024 / PR #48, docs-only governance advance), `3fbd7a3c8d207db47b747ac516f8d66b593337ef` + merge `ac03048a86f852fa73431dd2411d26ef1f91405b` (PROD-025 / PR #50). Nothing else landed on `main` in this baseline range.
+4. GitHub Actions workflow `CI`, run #72 / ID `33752285990`: `head_sha` = `ac03048a86f852fa73431dd2411d26ef1f91405b` (exact match), event `push`, branch `main`, `run_attempt` 1, status `completed`, conclusion `success`, started 2026-09-03T11:54:55Z, completed 2026-09-03T11:58:16Z; job/check `ci` (ID `100638369138`) is `completed` / `success`. It is the only check run registered on the baseline SHA.
+5. Every CI job step succeeded on the baseline SHA: `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks` (`python manage.py check --fail-level WARNING`), `Migration check` (`python manage.py makemigrations --check --dry-run`), `Apply migrations` (`migrate --noinput`), `Run tests` (`python manage.py test --verbosity 2`, full PostgreSQL 18 test suite, Django 6.1.1), and all post/cleanup steps concluded `success`.
+6. CI on PR #50's final HEAD `3fbd7a3c8d207db47b747ac516f8d66b593337ef` is green: workflow `CI`, run #71 / ID `33751152570`, event `pull_request`, attempt 1, `completed` / `success` (2026-09-03T11:42:26Z→11:45:58Z); job/check `ci` (ID `100634761199`) is `completed` / `success`, and every step from environment setup through Django checks, migration checks, migrations and the full test suite succeeded.
+7. PROD-024 / PR #48 is `MERGED` / completed (merged 2026-09-03T09:35:26Z); its merge commit `5924352babd90e84929e256f44772cebf81e5089` is the first parent of the new baseline SHA. CI on that merge commit is green (run #70 / ID `33739690725`, check `ci` ID `100598438095` — `completed` / `success`, 2026-09-03T09:35:28Z→09:38:41Z). CI on PR #48's final HEAD `c34227034c3940c313d2fa2139d0d9e98a015138` was also green (run #69 / ID `33738042486`, check `ci` ID `100593173657` — `completed` / `success`).
+8. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+9. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-026 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-026 — Advance production baseline after PROD-025 (F-18) (Issue #51) |
+| Status | Documentation-only governance change; pending Architect review and Owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `cb79892fc29b4c4f86b5881e6273924d96831d9a` → `ac03048a86f852fa73431dd2411d26ef1f91405b` (`main`) |
+| Completed production change | PROD-025 / F-18 / Issue #49 / PR #50 — merged 2026-09-03T11:54:52Z |
+| Intermediate governance merge in range | PROD-024 / PR #48 — merged 2026-09-03T09:35:26Z (docs-only; merge commit `5924352babd90e84929e256f44772cebf81e5089`; CI run #70 / ID `33739690725`, check `ci` ID `100598438095` — `completed` / `success`) |
+| Verified on | 2026-09-03 |
+
+### Completion record — PROD-025 / PR #50 (merged)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-025 — Wire domain events to notifications (F-18) (Issue #49) |
+| Status | ✅ MERGED / completed on 2026-09-03T11:54:52Z — not in review, not open |
+| Pull request | #50 (`Kvasha62/Amazone_Clone_Production`) — `PROD-025: Wire domain events to notifications (F-18)` — MERGED |
+| Branch | `arena/01a066e9-amazone-clone-production` |
+| Final PR HEAD | `3fbd7a3c8d207db47b747ac516f8d66b593337ef` — `PROD-025: Wire domain events to notifications (F-18)` |
+| CI on final PR HEAD | ✅ green — GitHub Actions run #71 / ID `33751152570`, check run `ci` ID `100634761199` — `completed` / `success` (2026-09-03T11:42:26Z→11:45:58Z) |
+| Merge commit on `main` | `ac03048a86f852fa73431dd2411d26ef1f91405b` — `Merge pull request #50 from Kvasha62/arena/01a066e9-amazone-clone-production` — **the new baseline SHA** |
+| CI on merge commit | ✅ green — GitHub Actions run #72 / ID `33752285990`, check run `ci` ID `100638369138` — `completed` / `success` |
+| Files changed | `apps/notifications/constants.py`; `apps/notifications/services/notification_events.py` (new); `apps/notifications/services/notification_service.py`; `apps/notifications/tests/test_event_wiring.py` (new); `apps/notifications/tests/test_services.py`; `apps/orders/services/order_service.py`; `apps/payments/services/payment_service.py`; `config/test_runner.py` |
+
+Scope of PROD-025 (closed audit finding F-18): the pre-existing notification
+service methods and Celery tasks had no callers from authoritative business
+paths. PROD-025 added one explicit event-to-notification boundary,
+`NotificationEvents`, and invoked it only from the existing authoritative
+`OrderService` order-creation/status/cancellation transitions and
+`PaymentService.confirm_payment()` success transition. It maps only existing
+notification types, so an order status without a notification contract (for
+example `processing`) emits nothing. Existing confirmation and shipped-email
+Celery tasks are dispatched for their matching committed order events.
+
+Notification emission uses `transaction.on_commit(..., robust=True)` within
+the existing service transactions: rolled-back business operations emit
+nothing, workers see only committed rows, and callback failures are logged
+without converting an already-committed business result into a false failure.
+Repeated payment confirmation remains idempotent and does not duplicate the
+payment-success notification. The implementation introduced no event bus,
+outbox, new task, queue, transaction boundary, model or migration. Regression
+coverage records event mapping, authoritative-path wiring, rollback behavior,
+payment retry/idempotency, and existing task execution. `config/test_runner.py`
+only enables Celery eager execution for the test session; production Celery
+behavior is unchanged. Public API contracts, models, migrations, dependencies,
+CI workflow and deployment configuration are unchanged. The functional PR did
+not modify this baseline document, and `Kvasha62/Amazone_Clone` was untouched.
+
+PROD-025 / F-18 is recorded as completed/merged via PR #50 and is part of the
+verified `main` state at the new baseline SHA. This pull request (PROD-026) is
+a docs-only governance change that modifies only
+`docs/production/PRODUCTION_BASELINE.md`; it does not change application or
+test source, API, models, migrations, dependencies, CI, deployment
+configuration, or the educational repository `Kvasha62/Amazone_Clone`, and it
+does not remediate any functional or audit finding. F-19, F-20, CI-01 and all
+N-findings remain outside this ticket and unchanged. Architect review is
+required before the Owner performs the final merge; the Architect/Assistant
+must not merge this governance pull request.
+
+## Historical baseline record — PROD-023 (superseded)
+
+This record was current immediately before PROD-026. It is preserved for audit
+and is now superseded by the approved baseline at the top of this document.
 
 ## Approved baseline commit
 
@@ -36,13 +139,13 @@ Earlier baseline records are preserved below as history.
 7. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
 8. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
 
-## Baseline advance — PROD-024 (this document)
+## Baseline advance — PROD-024 (merged via PR #48; record preserved)
 
 | Field | Value |
 |---|---|
 | Ticket | PROD-024 — Advance production baseline after PROD-023 (F-23) (Issue #47) |
-| Status | Documentation-only governance change; pending Architect review and Owner merge |
-| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Status | Documentation-only governance change; MERGED / completed via PR #48 (merge commit `5924352babd90e84929e256f44772cebf81e5089`, merged 2026-09-03T09:35:26Z) |
+| Change class | That pull request changed only `docs/production/PRODUCTION_BASELINE.md` |
 | Advance | Previous baseline `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` → `cb79892fc29b4c4f86b5881e6273924d96831d9a` (`main`) |
 | Completed production change | PROD-023 / PR #45 — merged 2026-09-03T08:44:38Z |
 | Intermediate governance merge in range | PROD-022 / PR #44 — merged 2026-09-03T08:17:08Z (docs-only; merge commit `f99cebef3c054bd60b561f9a14b1ba23f673cb80`; CI run #66 / ID `33732530492`, check `ci` ID `100575525440` — `completed` / `success`) |
@@ -93,15 +196,13 @@ CI/deployment configuration is unchanged. The educational repository
 `Kvasha62/Amazone_Clone` was not touched.
 
 PROD-023 is recorded as completed/merged via PR #45 and is part of the verified
-`main` state at the new baseline SHA. This pull request (PROD-024) is a
-docs-only governance change that modifies only
-`docs/production/PRODUCTION_BASELINE.md`; it does not change source code, API,
+`main` state at this historical baseline SHA. PROD-024 was a docs-only
+governance change that modified only
+`docs/production/PRODUCTION_BASELINE.md`; it did not change source code, API,
 models, migrations, dependencies, CI, deployment configuration, or the
-educational repository `Kvasha62/Amazone_Clone`, and it does not remediate any
-audit finding — all remaining audit findings are outside this ticket and
-remain unchanged. Architect review is required before the Owner performs the
-final merge; the Architect/Assistant must not merge this governance pull
-request.
+educational repository `Kvasha62/Amazone_Clone`, and it did not remediate any
+audit finding. Architect review and the Owner merge were completed via PR #48
+on 2026-09-03; this record is preserved for audit.
 
 ## Historical baseline record — PROD-021 (superseded)
 
