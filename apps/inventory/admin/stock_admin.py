@@ -18,6 +18,7 @@
 # ────────────────────────────────────────────────────────────────────────
 
 from django.contrib import admin
+from django.core.exceptions import PermissionDenied
 
 from apps.core.admin_guards import ProtectedFieldsAdminMixin
 from apps.inventory.models import Stock, StockMovement
@@ -89,6 +90,27 @@ class StockAdmin(ProtectedFieldsAdminMixin, admin.ModelAdmin):
         """
         return False
 
+    # ── PROD-032 / F-25: удаление Stock через Admin запрещено ────────
+    # StockMovement.stock использует on_delete=CASCADE, поэтому удаление
+    # Stock уничтожило бы append-only аудит-историю StockMovement.
+    # Блокируем все административные пути удаления: одиночное, массовое
+    # (bulk action) и любой вызов delete_model / delete_queryset.
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def delete_model(self, request, obj):
+        raise PermissionDenied(
+            'Удаление Stock через Admin запрещено (PROD-032 / F-25): '
+            'это уничтожило бы аудит-историю StockMovement.'
+        )
+
+    def delete_queryset(self, request, queryset):
+        raise PermissionDenied(
+            'Массовое удаление Stock через Admin запрещено '
+            '(PROD-032 / F-25): это уничтожило бы аудит-историю StockMovement.'
+        )
+
     @admin.display(description='SKU', ordering='variant__sku')
     def variant_sku(self, obj):
         return getattr(obj.variant, 'sku', '—')
@@ -115,6 +137,28 @@ class StockMovementAdmin(admin.ModelAdmin):
     )
     ordering = ('-created_at',)
     list_per_page = 50
+
+    # ── PROD-032 / F-25: удаление StockMovement через Admin запрещено ──
+    # StockMovement — append-only аудиторский журнал складских движений.
+    # Удаление записи нарушило бы целостность аудита и идемпотентность
+    # парных движений (RESERVE/RELEASE, RESERVE/OUT).
+    # Блокируем все административные пути удаления: одиночное, массовое
+    # (bulk action) и любой вызов delete_model / delete_queryset.
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def delete_model(self, request, obj):
+        raise PermissionDenied(
+            'Удаление StockMovement через Admin запрещено (PROD-032 / F-25): '
+            'StockMovement — append-only аудиторский журнал.'
+        )
+
+    def delete_queryset(self, request, queryset):
+        raise PermissionDenied(
+            'Массовое удаление StockMovement через Admin запрещено '
+            '(PROD-032 / F-25): StockMovement — append-only аудиторский журнал.'
+        )
 
     @admin.display(description='Вариант')
     def stock_variant(self, obj):

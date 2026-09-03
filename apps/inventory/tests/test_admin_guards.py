@@ -291,3 +291,184 @@ class StockAuthoritativePathTests(StockAdminGuardTestCase):
         stock = InventoryService.get_or_create_stock(self.other_variant)
         self.assertEqual(stock.quantity, 0)
         self.assertEqual(stock.reserved_quantity, 0)
+
+
+# ────────────────────────────────────────────────────────────────────
+# PROD-032 / F-25 — Admin deletion guards for Stock and StockMovement.
+#
+# StockMovement.stock uses on_delete=CASCADE, so deleting a Stock row
+# through Admin would cascade-delete its audit history.  Deleting a
+# StockMovement directly removes an individual audit record.  Both
+# paths are now blocked at the Admin layer.
+# ────────────────────────────────────────────────────────────────────
+
+from apps.inventory.admin.stock_admin import StockMovementAdmin
+
+
+class StockAdminDeleteGuardTests(StockAdminGuardTestCase):
+    """PROD-032 / F-25 — Stock deletion is prohibited through Admin."""
+
+    def setUp(self):
+        super().setUp()
+        self.movement_admin = StockMovementAdmin(StockMovement, self.site)
+        # Create a StockMovement to verify cascade is blocked.
+        self.movement = StockMovement.objects.create(
+            stock=self.stock,
+            kind='in',
+            delta=50,
+            quantity_before=100,
+            quantity_after=150,
+            note='PROD-032 test movement',
+        )
+
+    # ── AC-1: object-level deletion is prohibited ──
+
+    def test_has_delete_permission_is_false(self):
+        self.assertFalse(self.admin.has_delete_permission(self.request))
+        self.assertFalse(
+            self.admin.has_delete_permission(self.request, obj=self.stock),
+        )
+
+    def test_delete_model_raises_and_keeps_stock_and_movements(self):
+        with self.assertRaises(PermissionDenied):
+            self.admin.delete_model(self.request, self.stock)
+
+        self.assertTrue(Stock.objects.filter(pk=self.stock.pk).exists())
+        # AC-5: audit history is preserved.
+        self.assertTrue(
+            StockMovement.objects.filter(pk=self.movement.pk).exists(),
+        )
+
+    # ── AC-2: bulk/queryset deletion is prohibited ──
+
+    def test_delete_queryset_raises_and_keeps_stock_and_movements(self):
+        qs = Stock.objects.filter(pk=self.stock.pk)
+        with self.assertRaises(PermissionDenied):
+            self.admin.delete_queryset(self.request, qs)
+
+        self.assertTrue(Stock.objects.filter(pk=self.stock.pk).exists())
+        self.assertTrue(
+            StockMovement.objects.filter(pk=self.movement.pk).exists(),
+        )
+
+    def test_delete_selected_action_is_unavailable(self):
+        actions = self.admin.get_actions(self.request)
+        self.assertNotIn('delete_selected', actions)
+
+    # ── AC-1/AC-2/AC-5 via HTTP Admin path ──
+
+    def test_admin_delete_view_is_forbidden_and_audit_preserved(self):
+        self.client.force_login(self.staff)
+        url = f'/admin/inventory/stock/{self.stock.pk}/delete/'
+
+        response = self.client.post(url, {'post': 'yes'})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Stock.objects.filter(pk=self.stock.pk).exists())
+        self.assertTrue(
+            StockMovement.objects.filter(pk=self.movement.pk).exists(),
+        )
+
+
+class StockMovementAdminDeleteGuardTests(StockAdminGuardTestCase):
+    """PROD-032 / F-25 — StockMovement deletion is prohibited through Admin."""
+
+    def setUp(self):
+        super().setUp()
+        self.movement_admin = StockMovementAdmin(StockMovement, self.site)
+        self.movement = StockMovement.objects.create(
+            stock=self.stock,
+            kind='in',
+            delta=50,
+            quantity_before=100,
+            quantity_after=150,
+            note='PROD-032 movement guard test',
+        )
+
+    # ── AC-3: object-level deletion is prohibited ──
+
+    def test_has_delete_permission_is_false(self):
+        self.assertFalse(
+            self.movement_admin.has_delete_permission(self.request),
+        )
+        self.assertFalse(
+            self.movement_admin.has_delete_permission(
+                self.request, obj=self.movement,
+            ),
+        )
+
+    def test_delete_model_raises_and_keeps_movement(self):
+        with self.assertRaises(PermissionDenied):
+            self.movement_admin.delete_model(self.request, self.movement)
+
+        # AC-5: the movement itself is preserved.
+        self.assertTrue(
+            StockMovement.objects.filter(pk=self.movement.pk).exists(),
+        )
+
+    # ── AC-4: bulk/queryset deletion is prohibited ──
+
+    def test_delete_queryset_raises_and_keeps_movements(self):
+        qs = StockMovement.objects.filter(pk=self.movement.pk)
+        with self.assertRaises(PermissionDenied):
+            self.movement_admin.delete_queryset(self.request, qs)
+
+        self.assertTrue(
+            StockMovement.objects.filter(pk=self.movement.pk).exists(),
+        )
+
+    def test_delete_selected_action_is_unavailable(self):
+        actions = self.movement_admin.get_actions(self.request)
+        self.assertNotIn('delete_selected', actions)
+
+    # ── AC-3/AC-4/AC-5 via HTTP Admin path ──
+
+    def test_admin_delete_view_is_forbidden_and_movement_preserved(self):
+        self.client.force_login(self.staff)
+        url = (
+            f'/admin/inventory/stockmovement/{self.movement.pk}/delete/'
+        )
+
+        response = self.client.post(url, {'post': 'yes'})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(
+            StockMovement.objects.filter(pk=self.movement.pk).exists(),
+        )
+
+
+class InventoryServiceUnchangedByDeleteGuardTests(StockAdminGuardTestCase):
+    """AC-6 — InventoryService mutation and audit paths still work."""
+
+    def test_restock_creates_movement_after_delete_guard(self):
+        movement = InventoryService.restock(
+            self.variant, 25,
+            performed_by=self.staff,
+            note='PROD-032 restock verify',
+        )
+        self.stock.refresh_from_db()
+        self.assertEqual(self.stock.quantity, 125)
+        self.assertEqual(movement.quantity_before, 100)
+        self.assertEqual(movement.quantity_after, 125)
+        self.assertTrue(
+            StockMovement.objects.filter(
+                stock=self.stock, note='PROD-032 restock verify',
+            ).exists(),
+        )
+
+    def test_reserve_and_release_still_work(self):
+        InventoryService.reserve_stock(
+            self.variant, 10,
+            performed_by=self.staff,
+            note='PROD-032 reserve',
+        )
+        self.stock.refresh_from_db()
+        self.assertEqual(self.stock.reserved_quantity, 30)
+
+        InventoryService.release_stock(
+            self.variant, 10,
+            performed_by=self.staff,
+            note='PROD-032 release',
+        )
+        self.stock.refresh_from_db()
+        self.assertEqual(self.stock.reserved_quantity, 20)
