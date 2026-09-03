@@ -1,4 +1,112 @@
-# Production Baseline — PROD-021
+# Production Baseline — PROD-023
+
+## Approved baseline commit
+
+| Field | Value |
+|---|---|
+| Repository | `Kvasha62/Amazone_Clone_Production` |
+| Branch | `main` |
+| Approved baseline SHA | `cb79892fc29b4c4f86b5881e6273924d96831d9a` |
+| Baseline commit title | `Merge pull request #45 from Kvasha62/arena/01a0665b-amazone-clone-production` |
+| Baseline commit parents | `f99cebef3c054bd60b561f9a14b1ba23f673cb80` (`main` after the PROD-022 governance advance / PR #44) and `1177c6614b1207a9b93ec649ccd73d06ead0182e` (final HEAD of PR #45) |
+| CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run #68 / ID `33735008917` (event `push`, branch `main`, attempt 1), job/check `ci` (ID `100583400043`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; every job step succeeded — `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks` (`python manage.py check --fail-level WARNING`), `Migration check` (`makemigrations --check --dry-run` → no changes), `Apply migrations` (`migrate --noinput`), `Run tests` (full PostgreSQL 18 test suite, Django 6.1.1), and all post/cleanup steps; run started 2026-09-03T08:44:40Z, completed 2026-09-03T08:48:06Z |
+| Approved on | 2026-09-03 |
+| Ticket | PROD-024 |
+
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`cb79892fc29b4c4f86b5881e6273924d96831d9a` is the authoritative production
+state: it is the merge commit of completed PROD-023 (PR #45), and its
+first-parent history contains the merge commit of the PROD-022 governance
+advance (PR #44, `f99cebef3c054bd60b561f9a14b1ba23f673cb80`) on top of the
+previous baseline `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f`.
+Earlier baseline records are preserved below as history.
+
+## Verification performed (read-only)
+
+1. GitHub `main` (REST API `branches/main`), `git ls-remote origin refs/heads/main`, local `main`, and `origin/main` all resolve to `cb79892fc29b4c4f86b5881e6273924d96831d9a` — an exact match with the new production baseline SHA (verified 2026-09-03).
+2. `main` is exactly 4 commits ahead of and 0 commits behind the previous baseline `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` (`compare/0fb5079...cb79892`): `1e1ef97f0c18c03bb6d6387faed51ef3edc655f0` + merge `f99cebef3c054bd60b561f9a14b1ba23f673cb80` (PROD-022 / PR #44, docs-only governance advance), `1177c6614b1207a9b93ec649ccd73d06ead0182e` + merge `cb79892fc29b4c4f86b5881e6273924d96831d9a` (PROD-023 / PR #45). Nothing else has landed on `main` since the previous baseline.
+3. GitHub Actions workflow `CI`, run #68 / ID `33735008917`: `head_sha` = `cb79892fc29b4c4f86b5881e6273924d96831d9a` (exact match), event `push`, branch `main`, `run_attempt` 1, status `completed`, conclusion `success`, started 2026-09-03T08:44:40Z, completed 2026-09-03T08:48:06Z; job `ci` (ID `100583400043`) is `completed` / `success`. It is the only check run registered on the baseline SHA.
+4. Every CI job step succeeded on the baseline SHA: `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks` (`python manage.py check --fail-level WARNING`), `Migration check` (`python manage.py makemigrations --check --dry-run`), `Apply migrations` (`migrate --noinput`), `Run tests` (`python manage.py test --verbosity 2`, full PostgreSQL 18 test suite, Django 6.1.1), and all post/cleanup steps concluded `success`.
+5. PROD-023 / PR #45 is `MERGED` / completed (merged 2026-09-03T08:44:38Z); its merge commit is exactly the baseline SHA `cb79892fc29b4c4f86b5881e6273924d96831d9a`. CI on its final PR HEAD `1177c6614b1207a9b93ec649ccd73d06ead0182e` was green (run #67 / ID `33733615364`, check `ci` ID `100578973186` — `completed` / `success`, 2026-09-03T08:29:22Z→08:32:53Z).
+6. PROD-022 / PR #44 (the governance advance that recorded the previous baseline) is `MERGED` / completed (merged 2026-09-03T08:17:08Z); its merge commit is `f99cebef3c054bd60b561f9a14b1ba23f673cb80` (first parent of the baseline SHA). CI on that merge commit is green (run #66 / ID `33732530492`, check `ci` ID `100575525440` — `completed` / `success`, 2026-09-03T08:17:10Z→08:21:18Z).
+7. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+8. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-024 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-024 — Advance production baseline after PROD-023 (F-23) (Issue #47) |
+| Status | Documentation-only governance change; pending Architect review and Owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` → `cb79892fc29b4c4f86b5881e6273924d96831d9a` (`main`) |
+| Completed production change | PROD-023 / PR #45 — merged 2026-09-03T08:44:38Z |
+| Intermediate governance merge in range | PROD-022 / PR #44 — merged 2026-09-03T08:17:08Z (docs-only; merge commit `f99cebef3c054bd60b561f9a14b1ba23f673cb80`; CI run #66 / ID `33732530492`, check `ci` ID `100575525440` — `completed` / `success`) |
+| Verified on | 2026-09-03 |
+
+### Completion record — PROD-023 / PR #45 (merged)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-023 — Protect `Wishlist.items_count` from Django Admin mutation (F-23) (Issue #46) |
+| Status | ✅ MERGED / completed on 2026-09-03T08:44:38Z — not in review, not open |
+| Pull request | #45 (`Kvasha62/Amazone_Clone_Production`) — `PROD-023: Protect Wishlist.items_count from Admin mutation (F-23)` — MERGED |
+| Branch | `arena/01a0665b-amazone-clone-production` |
+| Commits | `1177c6614b1207a9b93ec649ccd73d06ead0182e` — `PROD-023: protect Wishlist.items_count from Admin mutation (F-23)` (final PR HEAD) |
+| CI on final PR HEAD | ✅ green — GitHub Actions run #67 / ID `33733615364`, check run `ci` ID `100578973186` — `completed` / `success` (2026-09-03T08:32:52Z) |
+| Merge commit on `main` | `cb79892fc29b4c4f86b5881e6273924d96831d9a` — `Merge pull request #45 from Kvasha62/arena/01a0665b-amazone-clone-production` — **the new baseline SHA** |
+| CI on merge commit | ✅ green — GitHub Actions run #68 / ID `33735008917`, check run `ci` ID `100583400043` — `completed` / `success` |
+| Files changed | `apps/wishlist/admin/wishlist_admin.py`, `apps/wishlist/tests/test_admin_guards.py` (new) |
+
+Scope of PROD-023 (closed audit finding F-23):
+`Wishlist.items_count` is a denormalized business-state counter whose only
+legitimate writers are the `WishlistService` methods — `add_item()`
+(`F('items_count') + 1`), `remove_item()` / `move_to_cart()`
+(`Greatest(F('items_count') - n, 0)`) and `clear()` (`items_count = 0`).
+`WishlistAdmin` treated `items_count` as an ordinary ModelForm input, so a
+normal Admin save or a crafted POST could write an arbitrary value and
+desynchronize `Wishlist.items_count` from the actual number of `WishlistItem`
+rows — the same class of Admin ↔ domain bypass closed for `Coupon.times_used`
+by PROD-004 (F-07). The fix reuses the existing PROD-004 guard with no new
+architecture: `WishlistAdmin` now subclasses `ProtectedFieldsAdminMixin`
+(`apps/core/admin_guards.py`) with `protected_fields = ('items_count',)` —
+Layer 1 (form) keeps `items_count` in `readonly_fields` /
+`get_readonly_fields()`, so the generated ModelForm has no input and an
+ordinary Admin POST cannot bind the field; Layer 2 (server-side)
+`save_model()` raises `PermissionDenied` when the in-memory value differs
+from the stored row (change) or the model default (add), and change-saves
+write an explicit `update_fields` set that excludes `items_count`. `user`
+remains editable. `WishlistService` is unchanged; the API, models,
+migrations and other bounded contexts are unchanged. New regression tests:
+`apps/wishlist/tests/test_admin_guards.py` — `items_count` is never a
+change/add form input, crafted Admin change/add POSTs cannot mutate the
+counter while allowed fields still save, direct `save_model()` rejects an
+in-memory counter change (with the UPDATE excluding the protected column)
+while still allowing `user` edits, and service-level `add_item()` /
+`remove_item()` / `clear()` keep the counter aligned with actual
+`WishlistItem` rows. `makemigrations --check --dry-run` → no changes.
+CI/deployment configuration is unchanged. The educational repository
+`Kvasha62/Amazone_Clone` was not touched.
+
+PROD-023 is recorded as completed/merged via PR #45 and is part of the verified
+`main` state at the new baseline SHA. This pull request (PROD-024) is a
+docs-only governance change that modifies only
+`docs/production/PRODUCTION_BASELINE.md`; it does not change source code, API,
+models, migrations, dependencies, CI, deployment configuration, or the
+educational repository `Kvasha62/Amazone_Clone`, and it does not remediate any
+audit finding — all remaining audit findings are outside this ticket and
+remain unchanged. Architect review is required before the Owner performs the
+final merge; the Architect/Assistant must not merge this governance pull
+request.
+
+## Historical baseline record — PROD-021 (superseded)
+
+This record was current immediately before PROD-024. It is preserved for audit
+and is now superseded by the approved baseline at the top of this document.
 
 ## Approved baseline commit
 
@@ -36,13 +144,13 @@ Earlier baseline records are preserved below as history.
 7. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
 8. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
 
-## Baseline advance — PROD-022 (this document)
+## Baseline advance — PROD-022 (merged via PR #44; record preserved)
 
 | Field | Value |
 |---|---|
 | Ticket | PROD-022 — Advance production baseline after PROD-021 (Issue #43) |
-| Status | Documentation-only governance change; pending Architect review and Owner merge |
-| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Status | Documentation-only governance change; MERGED / completed via PR #44 (merge commit `f99cebef3c054bd60b561f9a14b1ba23f673cb80`, merged 2026-09-03T08:17:08Z) |
+| Change class | That pull request changed only `docs/production/PRODUCTION_BASELINE.md` |
 | Advance | Previous baseline `fb29effb889e2589244b50751f1bcd4ee38ae116` → `0fb5079f2d3b330ffdc6772ee0a0399fe0d6a98f` (`main`) |
 | Completed production change | PROD-021 / PR #42 — merged 2026-09-03T07:57:10Z |
 | Intermediate governance merge in range | PROD-020 / PR #40 — merged 2026-09-03T05:27:49Z (docs-only; merge commit `411177cf772f680568f014c02fde4bf3ed0bc863`; CI run #62 / ID `33718949417`, check `ci` ID `100533940584` — `completed` / `success`) |
