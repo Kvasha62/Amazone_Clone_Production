@@ -166,18 +166,20 @@ class MoveToCartTests(CatalogTestCase):
 
     def test_move_skips_domain_error_and_continues(self):
         """Expected per-item domain failures don't stop the batch move."""
-        item1 = create_test_wishlist_item(self.wl, self.variant_128)
+        item1 = self.item  # already created in setUp with variant_128
         item2 = create_test_wishlist_item(self.wl, self.variant_256)
         self.wl.items_count = 2
         self.wl.save()
 
+        def _add_item_side_effect(cart, variant_id, quantity):
+            if variant_id == self.variant_128.pk:
+                raise ValidationError({'detail': 'stock insufficient'})
+            return None
+
         with mock.patch.object(
             CartService,
             'add_item',
-            side_effect=[
-                ValidationError({'detail': 'stock insufficient'}),
-                None,
-            ],
+            side_effect=_add_item_side_effect,
         ):
             moved = WishlistService.move_to_cart(
                 self.user,
@@ -190,7 +192,7 @@ class MoveToCartTests(CatalogTestCase):
 
     def test_move_unexpected_error_propagates(self):
         """Unexpected programming/DB failures are not converted to partial success."""
-        unexpected = create_test_wishlist_item(self.wl, self.variant_128)
+        unexpected = self.item  # already created in setUp with variant_128
         self.wl.items_count = 1
         self.wl.save()
 

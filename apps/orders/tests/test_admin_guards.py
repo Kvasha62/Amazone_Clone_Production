@@ -318,14 +318,23 @@ class OrderAdminAuthoritativeActionTests(OrderAdminGuardTestCase):
 
     def test_confirm_selected_handles_domain_validation_error(self):
         """Expected domain errors keep the admin batch action alive."""
+        self.client.force_login(self.staff)
+
         with mock.patch(
             'apps.orders.services.order_service.OrderService.confirm',
             side_effect=ValidationError({'detail': 'cannot confirm'}),
         ):
-            self.admin.confirm_selected(
-                self.request,
-                Order.objects.filter(pk=self.order.pk),
+            response = self.client.post(
+                '/admin/orders/order/',
+                {
+                    'action': 'confirm_selected',
+                    'select_across': '0',
+                    'index': '0',
+                    '_selected_action': [str(self.order.pk)],
+                },
             )
+
+        self.assertEqual(response.status_code, 302)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, OrderStatus.PENDING)
 
@@ -343,14 +352,23 @@ class OrderAdminAuthoritativeActionTests(OrderAdminGuardTestCase):
 
     def test_cancel_selected_handles_domain_validation_error(self):
         """Expected domain errors keep the admin batch action alive."""
+        self.client.force_login(self.staff)
+
         with mock.patch(
             'apps.orders.services.order_service.OrderService.cancel',
             side_effect=ValidationError({'detail': 'cannot cancel'}),
         ):
-            self.admin.cancel_selected(
-                self.request,
-                Order.objects.filter(pk=self.order.pk),
+            response = self.client.post(
+                '/admin/orders/order/',
+                {
+                    'action': 'cancel_selected',
+                    'select_across': '0',
+                    'index': '0',
+                    '_selected_action': [str(self.order.pk)],
+                },
             )
+
+        self.assertEqual(response.status_code, 302)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, OrderStatus.PENDING)
 
