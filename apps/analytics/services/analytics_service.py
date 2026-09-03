@@ -42,6 +42,7 @@ from apps.analytics.constants import (
     PERIOD_WEEKLY,
     SOURCE_DIRECT,
 )
+from apps.analytics.locks import acquire_dedup_lock
 from apps.analytics.models import ProductView
 from apps.orders.models import Order, OrderItem
 from apps.orders.models.order import OrderStatus
@@ -79,6 +80,21 @@ class AnalyticsService:
           Один пользователь/сессия → один просмотр в час.
           Защищает от накруток (F5, боты).
 
+        КОНКУРЕНТНОСТЬ (PROD-021 / F-22):
+          Проверка «просмотр уже есть» и вставка — это check-then-insert;
+          сам по себе transaction.atomic() его НЕ сериализует (READ
+          COMMITTED: обе конкурентные транзакции видят «нет строки»).
+          Поэтому ключ дедупликации (товар + пользователь ИЛИ товар +
+          сессия) захватывается транзакционным advisory-локом
+          PostgreSQL — см. apps/analytics/locks.py. Лок берётся ДО
+          exists(), снимается автоматически на commit/rollback и
+          сериализует только конкурентов за тот же ключ.
+
+        ЛИЧНОСТЬ ДЕДУПЛИКАЦИИ:
+          • авторизованный → (product, user), скользящее окно 1 час;
+          • аноним → (product, session_key), скользящее окно 1 час;
+          • нет ни того, ни другого → дедупликация не применяется.
+
         ARGS:
             product: экземпляр Product
             user: авторизованный пользователь (опционально)
@@ -92,6 +108,16 @@ class AnalyticsService:
         """
         now = timezone.now()
         one_hour_ago = now - timedelta(hours=1)
+
+        # ── Сериализация ключа дедупликации ──
+        # Берём advisory-лок ДО проверки: пока текущая транзакция не
+        # завершится, конкурент с тем же (товар, пользователь/сессия)
+        # не выполнит ни свой exists(), ни свой INSERT.
+        acquire_dedup_lock(
+            product.pk,
+            user_id=user.pk if user else None,
+            session_key=session_key,
+        )
 
         # ── Дедупликация ──
         # Ищем просмотр этого товара этим пользователем/сессией за последний час.

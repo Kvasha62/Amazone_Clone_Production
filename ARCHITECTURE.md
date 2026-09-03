@@ -767,6 +767,7 @@ def reserve_stock(order):
 | Double reserve / release / commit of one order | Idempotency via `RESERVE`-movement pairing (`StockMovement.related_movement`) + order-level lock (`Order` → `Stock`): repeated/concurrent calls are no-ops (PROD-003) |
 | Silent refund loss on cancellation | Refund obligation `refund_required_amount` + `refund_failed` event + `retry_pending_refunds`; durable write survives rollback of the cancel transaction (PROD-003) |
 | Payment `SUCCEEDED` while order stuck `PENDING` | Idempotent webhook re-entry re-confirms the order; `reconcile_order_coordination` command heals both directions (PROD-003) |
+| Concurrent duplicate `ProductView` for one viewer (double `views_count`) | `pg_advisory_xact_lock()` on the deduplication identity (`product` + authenticated `user` **or** anonymous `session_key`) serializes the check-then-insert inside `AnalyticsService.record_view()`; the sliding one-hour window is not expressible as a `UniqueConstraint`, so the check itself is serialized (PROD-021 / F-22, `apps/analytics/locks.py`) |
 
 ---
 
