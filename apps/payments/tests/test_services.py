@@ -477,12 +477,10 @@ class HandleWebhookServiceTests(TestCase):
 
     def test_fresh_order_status_propagates_programming_error(self):
         """F-17: `_fresh_order_status` must not hide programming errors."""
-        from apps.orders.models import Order
-
-        with mock.patch('apps.orders.models.Order.objects') as mock_objects:
-            mock_objects.only.return_value.get.side_effect = RuntimeError(
-                'boom',
-            )
+        with mock.patch(
+            'apps.orders.models.Order.objects.only',
+            side_effect=RuntimeError('boom'),
+        ):
             with self.assertRaises(RuntimeError):
                 PaymentService._fresh_order_status(999)
 

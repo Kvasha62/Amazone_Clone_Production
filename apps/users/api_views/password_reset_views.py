@@ -57,7 +57,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Expected async/broker failures that trigger the synchronous email fallback.
-_CELERY_FALLBACK_ERRORS = (ImportError, ConnectionError)
+# RuntimeError is the exception Celery/kombu raises when the broker cannot be
+# reached and the enqueue retry limit is exceeded (Redis is not a dependency
+# of the request path). It is intentional to keep the existing sync fallback.
+_CELERY_FALLBACK_ERRORS = (ImportError, ConnectionError, RuntimeError)
 if KombuOperationalError is not None:
     _CELERY_FALLBACK_ERRORS = _CELERY_FALLBACK_ERRORS + (
         KombuOperationalError,

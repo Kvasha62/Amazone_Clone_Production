@@ -81,9 +81,9 @@ class PasswordResetRequestTests(TestCase):
         """F-17: programming failures must not silently fall back to sync."""
         with mock.patch(
             'apps.notifications.tasks.send_password_reset_email.delay',
-            side_effect=RuntimeError('bad task call'),
+            side_effect=TypeError('bad task call (wrong signature)'),
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(TypeError):
                 self.client.post(
                     self.url,
                     {'email': 'reset@example.com'},
