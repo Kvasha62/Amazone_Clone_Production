@@ -26,12 +26,23 @@
 
 name: amazone-clone-prod
 
+# Production log policy (PROD-027 / F-19): all service logs are sent to the
+# Docker json-file driver and rotated locally at 10 MiB x 5 files per
+# container.  This keeps the existing one-host Compose runtime self-contained;
+# external log shipping/retention is an operator concern and is not claimed
+# as implemented here.
+
 services:
   # ── PostgreSQL 18 (единственная поддерживаемая БД, AC-5) ──
   db:
     image: postgres:18
     container_name: amazone-clone-prod-db
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-amazonclone}
       POSTGRES_USER: ${POSTGRES_USER:-amazonclone}
@@ -52,6 +63,11 @@ services:
     image: redis:7-alpine
     container_name: amazone-clone-prod-redis
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     volumes:
       - redisdata:/data
@@ -72,6 +88,11 @@ services:
     image: amazone-clone-backend:prod
     container_name: amazone-clone-prod-web
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     env_file:
       - .env.production
     environment:
@@ -91,6 +112,8 @@ services:
       # Детерминированный startup (entrypoint): БД → миграции → static.
       RUN_MIGRATIONS: "true"
       RUN_COLLECTSTATIC: "true"
+    # Keep Gunicorn access telemetry query-string free; Django middleware
+    # provides the authoritative structured request record.
     command: >
       gunicorn config.wsgi:application
       --bind 0.0.0.0:8000
@@ -101,6 +124,7 @@ services:
       --max-requests-jitter 50
       --forwarded-allow-ips "*"
       --access-logfile -
+      --access-logformat '%(m)s %(U)s %(s)s %(D)sus request_id=%({X-Request-ID}i)s'
       --error-logfile -
     expose:
       - "8000"            # только внутри стека; наружу — nginx
@@ -130,6 +154,11 @@ services:
       dockerfile: Dockerfile.backend.prod
     container_name: amazone-clone-prod-celery
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     env_file:
       - .env.production
     environment:
@@ -177,6 +206,11 @@ services:
       dockerfile: Dockerfile.backend.prod
     container_name: amazone-clone-prod-celery-beat
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     env_file:
       - .env.production
     environment:
@@ -211,6 +245,11 @@ services:
     image: nginx:1.27-alpine
     container_name: amazone-clone-prod-nginx
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     ports:
       - "${PROD_HTTP_PORT:-8080}:80"
     volumes:

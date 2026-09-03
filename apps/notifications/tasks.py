@@ -45,10 +45,11 @@ def send_email_notification(notification_id: int):
 
     if notif.user and notif.user.email:
         # TODO: Рендеринг HTML-шаблона и реальная отправка
-        # Сейчас — заглушка (console backend)
+        # Сейчас — заглушка (console backend). Адрес получателя, тема и
+        # текст письма являются PII и никогда не попадают в production log.
         logger.info(
-            '📧 Email → %s: [%s] %s',
-            notif.user.email, notif.title, notif.body[:50],
+            'notification_email_delivery_started',
+            extra={'notification_id': notif.pk, 'channel': notif.channel},
         )
 
     notif.status = 'sent'

@@ -260,6 +260,9 @@ INSTALLED_APPS.insert(6, "django.contrib.postgres")
 DB_ENGINE = os.getenv("DB_ENGINE", "django.db.backends.postgresql")
 
 MIDDLEWARE = [
+    # Outermost application middleware: every response and application log
+    # gets a safe request/correlation id before it reaches the edge.
+    "apps.core.middleware.RequestCorrelationMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "corsheaders.middleware.CorsMiddleware",   # 🔴 CORS — ДО CommonMiddleware
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -428,7 +431,13 @@ CORS_ALLOW_HEADERS = [
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
+    "x-request-id",
+    "x-correlation-id",
 ]
+
+# Correlation is useful to browser clients too; only these non-secret bounded
+# identifiers are exposed, never authorization or application data.
+CORS_EXPOSE_HEADERS = ["X-Request-ID", "X-Correlation-ID"]
 
 # Разрешаем куки (если понадобятся)
 CORS_ALLOW_CREDENTIALS = True
@@ -573,3 +582,75 @@ EMAIL_BACKEND = os.getenv(
 )
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "noreply@amazone-clone.local")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+# ==========================================================
+# Production observability (PROD-027 / F-19)
+# ==========================================================
+# Application, Django and Celery records are emitted as JSON lines to the
+# existing container stream.  Docker Compose is the only routing/retention
+# layer in the canonical deployment; no external logging service is assumed.
+# The formatter has an allow-list for context fields and the middleware adds
+# request/correlation ids without reading request bodies or sensitive headers.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "observability_context": {
+            "()": "apps.core.observability.RequestContextFilter",
+        },
+    },
+    "formatters": {
+        "observability_json": {
+            "()": "apps.core.observability.JSONFormatter",
+        },
+    },
+    "handlers": {
+        "observability_console": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",
+            "formatter": "observability_json",
+            "filters": ["observability_context"],
+        },
+    },
+    "loggers": {
+        # Existing domain loggers keep their event names and safe operational
+        # ids while gaining request/task context through the formatter.
+        "apps": {
+            "handlers": ["observability_console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django": {
+            "handlers": ["observability_console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["observability_console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django.server": {
+            "handlers": ["observability_console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "celery": {
+            "handlers": ["observability_console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        # Celery's default success trace includes the task return value.  The
+        # lifecycle hooks above already record outcome/duration, so suppress
+        # that potentially sensitive value while retaining warnings/errors.
+        "celery.app.trace": {
+            "handlers": ["observability_console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+    },
+    "root": {
+        "handlers": ["observability_console"],
+        "level": "WARNING",
+    },
+}

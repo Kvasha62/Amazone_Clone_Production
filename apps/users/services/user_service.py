@@ -128,9 +128,11 @@ class UserService:
         # 📖 apps/users/signals.py — create_user_profile
         UserProfile.objects.get_or_create(user=user)
 
+        # Email is deliberately not included: the event remains useful for
+        # auditing while production telemetry avoids unnecessary PII.
         logger.info(
             'user_registered',
-            extra={'user_id': user.pk, 'email': email},
+            extra={'user_id': user.pk},
         )
         return user
 
