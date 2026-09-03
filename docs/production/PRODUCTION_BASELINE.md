@@ -1,4 +1,111 @@
-# Production Baseline — PROD-027
+# Production Baseline — PROD-029
+
+## Approved baseline commit
+
+| Field | Value |
+|---|---|
+| Repository | `Kvasha62/Amazone_Clone_Production` |
+| Branch | `main` |
+| Approved baseline SHA | `564f8d8b12a45efb1b604923a25c32f2d3224160` |
+| Baseline commit title | `Merge pull request #58 from Kvasha62/arena/01a06786-amazone-clone-production` |
+| Baseline commit parents | `37115610f91338e0f6fee1f783574a41cf1de171` (`main` after the PROD-028 governance advance / PR #56) and `085cc53bea7d5d1326bb2aea2ee36b98fb9782d0` (final HEAD of PR #58) |
+| Previous baseline | `0554c16d6af2575ca1aeb1022d28d5f1ab387101` |
+| CI workflow | `.github/workflows/ci.yml` (workflow name: `CI`) |
+| CI status on baseline SHA | ✅ green — GitHub Actions run #81 / ID `33773680760` (event `push`, branch `main`, attempt 1), job/check `ci` (ID `100709956877`) — `completed` / `success` |
+| Verified CI evidence on baseline SHA | Workflow `CI`; every job step succeeded — `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks` (`python manage.py check --fail-level WARNING`), `Migration check` (`makemigrations --check --dry-run` → no changes), `Apply migrations` (`migrate --noinput`), `Run tests` (full PostgreSQL 18 test suite on Python 3.13 with the pinned dependency set, Django 6.1.1; production install path `pip install -r requirements.txt`), and all post/cleanup steps; run started 2026-09-03T15:37:06Z, job completed 2026-09-03T15:40:06Z, run completed 2026-09-03T15:40:07Z |
+| Approved on | 2026-09-03 |
+| Ticket | PROD-030 |
+
+Production `main` points exactly at this SHA. This commit is the current
+production source-of-truth commit and the frozen reference point for every
+subsequent production change. `main` at
+`564f8d8b12a45efb1b604923a25c32f2d3224160` is the authoritative production
+state: it is the merge commit of completed PROD-029 / F-20 (PR #58), and its
+first-parent history contains the merge commit of the PROD-028 governance
+advance (PR #56, `37115610f91338e0f6fee1f783574a41cf1de171`) on top of the
+previous approved baseline `0554c16d6af2575ca1aeb1022d28d5f1ab387101`.
+Earlier baseline records are preserved below as history.
+
+## Verification performed (read-only)
+
+1. PR #58 is `MERGED` (merged 2026-09-03T15:37:03Z by the Owner); the GitHub Pull Requests API and `gh pr view` both report merge commit `564f8d8b12a45efb1b604923a25c32f2d3224160` and final HEAD `085cc53bea7d5d1326bb2aea2ee36b98fb9782d0`. Issue #57 (PROD-029) is `CLOSED` (2026-09-03T15:37:04Z).
+2. GitHub `main` (REST API `branches/main`) and `git ls-remote origin refs/heads/main` both resolve to `564f8d8b12a45efb1b604923a25c32f2d3224160` — an exact match with the new production baseline SHA (verified 2026-09-03). The GitHub commit API reports parents `37115610f91338e0f6fee1f783574a41cf1de171` and `085cc53bea7d5d1326bb2aea2ee36b98fb9782d0`, and the commit is `main`'s current tip.
+3. `main` is exactly 4 commits ahead of and 0 commits behind the previous baseline `0554c16d6af2575ca1aeb1022d28d5f1ab387101` (`compare/0554c16...564f8d8`): `39219f0ff2e9ac79cc86da3aa022f4f8b9b7e61c` + merge `37115610f91338e0f6fee1f783574a41cf1de171` (PROD-028 / PR #56, docs-only governance advance), `085cc53bea7d5d1326bb2aea2ee36b98fb9782d0` + merge `564f8d8b12a45efb1b604923a25c32f2d3224160` (PROD-029 / PR #58). The only files that differ across this range are `requirements.in` (added), `requirements.txt` (modified) and `config/tests/test_dependency_contract.py` (added) from PROD-029, plus `docs/production/PRODUCTION_BASELINE.md` from PROD-028. Nothing else landed on `main` in this baseline range.
+4. GitHub Actions workflow `CI`, run #81 / ID `33773680760`: `head_sha` = `564f8d8b12a45efb1b604923a25c32f2d3224160` (exact match), event `push`, branch `main`, `run_attempt` 1, status `completed`, conclusion `success`, started 2026-09-03T15:37:06Z, completed 2026-09-03T15:40:07Z; job/check `ci` (ID `100709956877`) is `completed` / `success` (2026-09-03T15:37:08Z→15:40:06Z). `ci` is the only check run GitHub reports on the baseline SHA.
+5. Every CI job step succeeded on the baseline SHA: `Set up job`, `Initialize containers`, `Checkout repository`, `Set up Python 3.13`, `Install dependencies`, `Django system checks`, `Migration check`, `Apply migrations`, `Run tests`, `Post Set up Python 3.13`, `Post Checkout repository`, `Stop containers`, `Complete job` — all `success`.
+6. CI on PR #58's final HEAD `085cc53bea7d5d1326bb2aea2ee36b98fb9782d0` is green: workflow `CI`, run #80 / ID `33766798557`, event `pull_request`, attempt 1, status `completed`, conclusion `success` (2026-09-03T14:25:54Z→14:31:06Z); job/check `ci` (ID `100686635380`) is `completed` / `success` (2026-09-03T14:25:57Z→14:31:05Z). The auxiliary `Sourcery review` check run (ID `100686647928`) on that HEAD is `completed` / `skipped`; `CI` is the authoritative workflow.
+7. Issue #59 named GitHub Actions run ID `33765015166` as the expected PROD-029 evidence. Re-verification against the GitHub Actions API on 2026-09-03 returned HTTP 404 for that ID — no such workflow run exists in this repository. Per AC-7 the baseline therefore records only the identifiers actually confirmed above: run #80 / ID `33766798557` (final PR HEAD) and run #81 / ID `33773680760` (merge commit / current `main`).
+8. PROD-029 functional scope was verified in the baseline tree itself: `requirements.in` holds 14 direct declarations and is documented as the human-maintained source only; `requirements.txt` is the generated set with 40 fully pinned `name==version` packages (direct + transitive) and no floating specifier; `Dockerfile.backend.prod` performs `COPY requirements.txt ./` + `pip install --no-cache-dir -r requirements.txt`; `.github/workflows/ci.yml` performs `pip install -r requirements.txt`; neither production path installs `requirements.in`. `config/tests/test_dependency_contract.py` enforces that contract.
+9. PROD-028 / PR #56 (the governance advance that recorded the previous baseline) is `MERGED` / completed (merged 2026-09-03T13:44:39Z); its merge commit `37115610f91338e0f6fee1f783574a41cf1de171` is the first parent of the new baseline SHA. CI on that merge commit is green (run #79 / ID `33762845282`, check `ci` ID `100673181934` — `completed` / `success`, 2026-09-03T13:44:42Z→13:48:07Z). CI on PR #56's final HEAD `39219f0ff2e9ac79cc86da3aa022f4f8b9b7e61c` is green (run #78 / ID `33762120146`, `completed` / `success`).
+10. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
+11. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
+
+## Baseline advance — PROD-030 (this document)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-030 — Advance production baseline after PROD-029 (F-20) (Issue #59) |
+| Status | Documentation-only governance change; pending Architect review and Owner merge |
+| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Advance | Previous baseline `0554c16d6af2575ca1aeb1022d28d5f1ab387101` → `564f8d8b12a45efb1b604923a25c32f2d3224160` (`main`) |
+| Completed production change | PROD-029 / F-20 / Issue #57 / PR #58 — merged 2026-09-03T15:37:03Z |
+| Intermediate governance merge in range | PROD-028 / PR #56 — merged 2026-09-03T13:44:39Z (docs-only; merge commit `37115610f91338e0f6fee1f783574a41cf1de171`) |
+| Verified on | 2026-09-03 |
+
+### Completion record — PROD-029 / PR #58 (merged)
+
+| Field | Value |
+|---|---|
+| Ticket | PROD-029 — Make production dependencies reproducible (F-20) (Issue #57) |
+| Status | ✅ MERGED / completed on 2026-09-03T15:37:03Z — not in review, not open |
+| Pull request | #58 (`Kvasha62/Amazone_Clone_Production`) — `PROD-029: Make production dependencies reproducible (F-20)` — MERGED |
+| Branch | `arena/01a06786-amazone-clone-production` |
+| Final PR HEAD | `085cc53bea7d5d1326bb2aea2ee36b98fb9782d0` — `PROD-029: make production dependencies reproducible (F-20)` |
+| CI on final PR HEAD | ✅ green — GitHub Actions run #80 / ID `33766798557`, check run `ci` ID `100686635380` — `completed` / `success` (2026-09-03T14:25:54Z→14:31:06Z) |
+| Merge commit on `main` | `564f8d8b12a45efb1b604923a25c32f2d3224160` — `Merge pull request #58 from Kvasha62/arena/01a06786-amazone-clone-production` — **the new baseline SHA** |
+| CI on merge commit | ✅ green — GitHub Actions run #81 / ID `33773680760`, check run `ci` ID `100709956877` — `completed` / `success` (2026-09-03T15:37:06Z→15:40:07Z) |
+| Files changed | `requirements.in` (new, 40 lines / 14 direct declarations); `requirements.txt` (regenerated, +111/−57, 40 fully pinned packages); `config/tests/test_dependency_contract.py` (new, 99 lines, dependency-contract tests) |
+| Diff size | +250 / −57 across exactly those three files |
+
+Scope of PROD-029 (closed audit finding F-20): reproducible production
+dependencies. Before PR #58 the repository shipped a single floating
+direct-dependency `requirements.txt`, so a production or CI install resolved
+whatever versions were current at build time. The functional PR introduced
+`requirements.in` as the human-maintained direct-dependency source and replaced
+`requirements.txt` with the fully pinned, generated resolution of it — 40
+direct and transitive packages, each recorded as `name==version`, generated
+with `uv pip compile --python-version 3.13 --python-platform
+x86_64-unknown-linux-gnu requirements.in -o requirements.txt`. The
+production install path is unchanged in shape and remains deterministic:
+`Dockerfile.backend.prod` copies and installs `requirements.txt` only, and
+`.github/workflows/ci.yml` runs `pip install -r requirements.txt`;
+`requirements.in` is never installed in Docker or CI.
+`config/tests/test_dependency_contract.py` guards the contract: every
+`requirements.txt` entry must stay fully pinned, every direct dependency from
+`requirements.in` must be pinned, the production Dockerfile and CI must
+install from `requirements.txt` and never from `requirements.in`, and no other
+root-level requirements file may appear.
+
+PROD-029 introduced no application, API, model, migration, settings, service,
+CI-workflow, Dockerfile, docker-compose or deployment-architecture change; it
+did not add or remove a dependency, change the Python or PostgreSQL contract,
+or modify this baseline document. `Kvasha62/Amazone_Clone` was untouched.
+
+PROD-029 / F-20 is recorded as completed/merged via PR #58 and is part of the
+verified `main` state at the new baseline SHA. This pull request (PROD-030) is
+a docs-only governance change that modifies only
+`docs/production/PRODUCTION_BASELINE.md`; it does not change application or
+test source, API, models, migrations, dependencies, CI, deployment
+configuration, or the educational repository `Kvasha62/Amazone_Clone`, and it
+does not remediate any functional or audit finding. CI-01, the N-findings and
+all other technical-debt items remain outside this ticket and unchanged.
+Architect review is required before the Owner performs the final merge; the
+Architect/Assistant must not merge this governance pull request.
+
+## Historical baseline record — PROD-027 (superseded)
+
+This record was current immediately before PROD-030. It is preserved for audit
+and is now superseded by the approved baseline at the top of this document.
 
 ## Approved baseline commit
 
@@ -37,13 +144,13 @@ Earlier baseline records are preserved below as history.
 7. `.github/workflows/ci.yml` exists and is unmodified by this ticket.
 8. Source repository `Kvasha62/Amazone_Clone` was not touched in any way.
 
-## Baseline advance — PROD-028 (this document)
+## Baseline advance — PROD-028 (merged via PR #56; record preserved)
 
 | Field | Value |
 |---|---|
 | Ticket | PROD-028 — Advance production baseline after PROD-027 (F-19) (Issue #55) |
-| Status | Documentation-only governance change; pending Architect review and Owner merge |
-| Change class | This pull request changes only `docs/production/PRODUCTION_BASELINE.md` |
+| Status | Documentation-only governance change; MERGED / completed via PR #56 (merge commit `37115610f91338e0f6fee1f783574a41cf1de171`, merged 2026-09-03T13:44:39Z) |
+| Change class | That pull request changed only `docs/production/PRODUCTION_BASELINE.md` |
 | Advance | Previous baseline `ac03048a86f852fa73431dd2411d26ef1f91405b` → `0554c16d6af2575ca1aeb1022d28d5f1ab387101` (`main`) |
 | Completed production change | PROD-027 / F-19 / Issue #53 / PR #54 — merged 2026-09-03T13:10:08Z |
 | Intermediate governance merge in range | PROD-026 / PR #52 — merged 2026-09-03T12:12:47Z (docs-only; merge commit `c0d155127d8144ec5577387c0dbe80ad12b2b5e6`) |
@@ -75,15 +182,16 @@ redesign, or new architecture was introduced, and the functional PR did not
 modify this baseline document. `Kvasha62/Amazone_Clone` was untouched.
 
 PROD-027 / F-19 is recorded as completed/merged via PR #54 and is part of the
-verified `main` state at the new baseline SHA. This pull request (PROD-028) is
-a docs-only governance change that modifies only
-`docs/production/PRODUCTION_BASELINE.md`; it does not change application or
+verified `main` state at this historical baseline SHA. PROD-028 was a
+docs-only governance change that modified only
+`docs/production/PRODUCTION_BASELINE.md`; it did not change application or
 test source, API, models, migrations, dependencies, CI, deployment
 configuration, or the educational repository `Kvasha62/Amazone_Clone`, and it
-does not remediate any functional or audit finding. F-20, CI-01 and all
-N-findings remain outside this ticket and unchanged. Architect review is
-required before the Owner performs the final merge; the Architect/Assistant
-must not merge this governance pull request.
+did not remediate any functional or audit finding. F-20 was subsequently
+closed by PROD-029 / PR #58, whose merge commit is the baseline recorded at
+the top of this document; CI-01 and the N-findings remained outside that
+ticket and unchanged. Architect review and the Owner merge were completed via
+PR #56 on 2026-09-03; this record is preserved for audit.
 
 ## Historical baseline record — PROD-025 (superseded)
 
