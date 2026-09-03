@@ -31,6 +31,24 @@ NOTIFICATION_TYPE_CHOICES = (
     (NOTIF_SYSTEM, 'Системное'),
 )
 
+# ────────────────────────────────────────────────────────────────────────
+# PROD-025 / F-18 — статусы заказа, у которых есть тип уведомления.
+#
+# Ключи — значения OrderStatus (apps/orders/models/order.py). Импортировать
+# OrderStatus сюда нельзя: это развернуло бы зависимость против
+# направления bounded context (notifications не должен знать про orders).
+#
+# Статусы заказа, которых здесь НЕТ (например, «processing»), уведомлений
+# не порождают: вводить для них новый тип означало бы менять контракт
+# модели Notification (choices → миграция), что в PROD-025 не входит.
+# ────────────────────────────────────────────────────────────────────────
+ORDER_STATUS_NOTIFICATION_TYPES = {
+    'confirmed': NOTIF_ORDER_CONFIRMED,
+    'shipped': NOTIF_ORDER_SHIPPED,
+    'delivered': NOTIF_ORDER_DELIVERED,
+    'cancelled': NOTIF_ORDER_CANCELLED,
+}
+
 # Каналы доставки
 CHANNEL_IN_APP = 'in_app'
 CHANNEL_EMAIL = 'email'

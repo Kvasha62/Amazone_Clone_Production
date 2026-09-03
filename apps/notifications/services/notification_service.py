@@ -20,6 +20,7 @@ from django.utils import timezone
 
 from apps.notifications.constants import (
     CHANNEL_IN_APP,
+    ORDER_STATUS_NOTIFICATION_TYPES,
     STATUS_PENDING,
     STATUS_READ,
     STATUS_SENT,
@@ -196,7 +197,26 @@ class NotificationService:
         )
 
     @staticmethod
-    def notify_order_status_changed(order, new_status: str) -> Notification:
+    def notify_order_status_changed(order, new_status: str) -> Notification | None:
+        """Уведомление о смене статуса заказа.
+
+        Тип уведомления берётся из ORDER_STATUS_NOTIFICATION_TYPES, а не
+        конструируется как f'order_{new_status}': FSM заказа содержит
+        состояния без уведомительного контракта («processing»), и создание
+        для них строки с несуществующим типом нарушало бы choices модели.
+
+        RETURNS:
+            Notification — для статусов с уведомительным контрактом;
+            None — для статусов без него (уведомление не создаётся).
+        """
+        notification_type = ORDER_STATUS_NOTIFICATION_TYPES.get(new_status)
+        if notification_type is None:
+            logger.debug(
+                'notification_skipped_no_type',
+                extra={'order_id': order.pk, 'order_status': new_status},
+            )
+            return None
+
         status_labels = {
             'confirmed': 'подтверждён',
             'shipped': 'отправлен',
@@ -207,7 +227,7 @@ class NotificationService:
         label = status_labels.get(new_status, new_status)
         return NotificationService.create(
             user=order.user,
-            notification_type=f'order_{new_status}',
+            notification_type=notification_type,
             title=f'Заказ {order.order_number} {label}',
             body=f'Статус заказа изменён: {label}.',
             related_object_type='order',

@@ -125,3 +125,17 @@ class ConvenienceMethodsTests(TestCase):
         order = create_test_order(user)
         n = NotificationService.notify_payment_success(order, None)
         self.assertEqual(n.notification_type, 'payment_success')
+
+    def test_notify_order_status_changed_without_notification_type(self):
+        """Статус заказа без уведомительного контракта → None, без строки БД.
+
+        PROD-025 / F-18: «processing» не имеет типа уведомления, поэтому
+        переход в него не создаёт уведомление (и не создаёт строку
+        с типом вне choices модели).
+        """
+        user = create_test_user()
+        order = create_test_order(user)
+        self.assertIsNone(
+            NotificationService.notify_order_status_changed(order, 'processing'),
+        )
+        self.assertFalse(Notification.objects.filter(user=user).exists())

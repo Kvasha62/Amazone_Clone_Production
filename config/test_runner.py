@@ -52,6 +52,22 @@ class AppDiscoverRunner(DiscoverRunner):
     Совместим с Python 3.12–3.15 и Django 6.0–6.1.
     """
 
+    def setup_test_environment(self, **kwargs):
+        super().setup_test_environment(**kwargs)
+
+        # PROD-025 / F-18: уведомления планируют Celery-задачи после COMMIT
+        # бизнес-транзакции. Брокера (Redis) в тестовом окружении нет, и
+        # каждая реальная доставка задачи упиралась бы в retry бэкенда
+        # результатов (~20 с на вызов), из-за чего прогон тестов становился
+        # непригодным. Стандартный для Django+Celery подход: в тестах задачи
+        # выполняются синхронно (eager), брокер не используется вовсе.
+        # Продакшен-поведение не меняется: настройка применяется только
+        # к процессу test runner'а.
+        from config.celery import app as celery_app
+
+        celery_app.conf.task_always_eager = True
+        celery_app.conf.task_eager_propagates = True
+
     def build_suite(self, test_labels=None, **kwargs):
         if not test_labels:
             test_labels = TEST_APP_LABELS

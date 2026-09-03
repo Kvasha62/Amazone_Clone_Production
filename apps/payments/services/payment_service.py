@@ -313,6 +313,17 @@ class PaymentService:
             external_event_id=external_id,
         )
 
+        # PROD-025 / F-18: бизнес-событие «оплата подтверждена» подключено
+        # к уведомлениям. Точка находится ПОСЛЕ идемпотентной ветки
+        # «платёж уже SUCCEEDED» (см. выше), поэтому повторная доставка
+        # вебхука не создаёт дубль уведомления; при откате транзакции
+        # (в т.ч. из-за сбоя подтверждения заказа) колбэк не выполняется.
+        from apps.notifications.services.notification_events import (
+            NotificationEvents,
+        )
+
+        NotificationEvents.payment_succeeded(payment.order, payment)
+
         # ── Подтверждаем заказ ──
         from apps.orders.services.order_service import OrderService
         from rest_framework.exceptions import ValidationError as DRFValidationError
