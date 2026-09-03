@@ -228,6 +228,15 @@ class OrderService:
         cart.is_active = False
         cart.save(update_fields=['is_active', 'updated_at'])
 
+        # PROD-025 / F-18: бизнес-событие «заказ создан» подключено к
+        # уведомлениям. Планируется после COMMIT, поэтому откат этой
+        # транзакции не оставляет уведомления о несуществующем заказе.
+        from apps.notifications.services.notification_events import (
+            NotificationEvents,
+        )
+
+        NotificationEvents.order_created(order)
+
         logger.info(
             'order_created',
             extra={
@@ -303,6 +312,17 @@ class OrderService:
             'updated_at',
         ])
         OrderService._handle_inventory_transition(order, new_status)
+
+        # PROD-025 / F-18: бизнес-событие «статус заказа изменён» подключено
+        # к уведомлениям (in-app + существующая email-задача) и планируется
+        # после COMMIT: откат (в т.ч. из-за сбоя резервирования стока) не
+        # оставляет уведомления о несостоявшемся переходе. Отмена заказа
+        # уведомляется из cancel() — единственного пути перехода в CANCELLED.
+        from apps.notifications.services.notification_events import (
+            NotificationEvents,
+        )
+
+        NotificationEvents.order_status_changed(order, new_status)
 
         logger.info(
             'order_status_changed',
@@ -655,6 +675,16 @@ class OrderService:
                                 'error': str(record_exc),
                             },
                         )
+
+        # PROD-025 / F-18: отмена заказа — отдельный авторитетный путь
+        # (transition_status() не принимает CANCELLED), поэтому уведомление
+        # о cancelled подключается здесь, после всех побочных эффектов
+        # отмены (купон, склад, возвраты).
+        from apps.notifications.services.notification_events import (
+            NotificationEvents,
+        )
+
+        NotificationEvents.order_status_changed(order, OrderStatus.CANCELLED)
 
         logger.info(
             'order_cancelled',
