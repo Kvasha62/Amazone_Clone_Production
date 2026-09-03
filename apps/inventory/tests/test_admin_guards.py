@@ -456,19 +456,16 @@ class InventoryServiceUnchangedByDeleteGuardTests(StockAdminGuardTestCase):
             ).exists(),
         )
 
-    def test_reserve_and_release_still_work(self):
-        InventoryService.reserve_stock(
-            self.variant, 10,
+    def test_adjust_stock_still_works_after_delete_guard(self):
+        InventoryService.adjust_stock(
+            self.variant, 80,
             performed_by=self.staff,
-            note='PROD-032 reserve',
+            note='PROD-032 adjust verify',
         )
         self.stock.refresh_from_db()
-        self.assertEqual(self.stock.reserved_quantity, 30)
-
-        InventoryService.release_stock(
-            self.variant, 10,
-            performed_by=self.staff,
-            note='PROD-032 release',
+        self.assertEqual(self.stock.quantity, 80)
+        self.assertTrue(
+            StockMovement.objects.filter(
+                stock=self.stock, note='PROD-032 adjust verify',
+            ).exists(),
         )
-        self.stock.refresh_from_db()
-        self.assertEqual(self.stock.reserved_quantity, 20)
