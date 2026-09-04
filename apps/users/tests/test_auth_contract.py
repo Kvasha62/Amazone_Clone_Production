@@ -314,6 +314,36 @@ class LogoutContractTests(AuthContractTestCase):
         resp = self.client.post(self.refresh_url, {'refresh': other_refresh}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
+    def test_logout_rejects_blacklisted_refresh_token_of_another_user(self):
+        """Ownership is checked before idempotent blacklist acknowledgment."""
+        access, _ = self._get_tokens()
+        other = User.objects.create_user(
+            username='logout_blacklisted_other',
+            email='logout_blacklisted_other@example.com',
+            password=self.password,
+        )
+        _, other_refresh = self._get_tokens(user=other)
+        other_jti = RefreshToken(other_refresh).payload['jti']
+        RefreshToken(other_refresh).blacklist()
+
+        self._authorize(access)
+        resp = self.client.post(
+            self.logout_url,
+            {'refresh': other_refresh},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # The request must not mutate the other user's blacklist state.
+        from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+        self.assertTrue(BlacklistedToken.objects.filter(token__jti=other_jti).exists())
+
+    def test_logout_rejects_access_token_used_as_refresh(self):
+        access, _ = self._get_tokens()
+        self._authorize(access)
+        resp = self.client.post(self.logout_url, {'refresh': access}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
 
 class DeactivationContractTests(AuthContractTestCase):
     """API-03: deactivation stops new auth and existing-access behaviour."""

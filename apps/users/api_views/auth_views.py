@@ -202,18 +202,31 @@ class LogoutView(APIView):
         input_ser.is_valid(raise_exception=True)
         refresh_token = input_ser.validated_data['refresh']
 
-        refresh = self._resolve_refresh_token(refresh_token)
+        # Cryptographic validation and token-type detection happen before any
+        # blacklist/ownership decision is made.
+        refresh, already_blacklisted = self._resolve_refresh_token(refresh_token)
 
-        if refresh is None:
-            # Already blacklisted -> client already cannot refresh from it.
-            return Response({'detail': 'Выполнен выход.'})
+        # Reject non-refresh tokens (e.g. an access token) before looking at
+        # ownership or blacklist state.
+        if refresh.payload.get(api_settings.TOKEN_TYPE_CLAIM) != RefreshToken.token_type:
+            raise InvalidToken(
+                {'detail': 'Токен обновления недействителен или истёк.'},
+            )
 
-        # Only the caller may revoke their own refresh capability.
+        # Only the caller may revoke (or idempotently acknowledge) their own
+        # refresh capability. Ownership must be checked before treating an
+        # already-blacklisted token as a successful logout, otherwise a
+        # blacklisted refresh token belonging to another user would return 200.
         token_user_id = refresh.payload.get(api_settings.USER_ID_CLAIM)
         if str(token_user_id) != str(request.user.pk):
             raise InvalidToken(
                 {'detail': 'Токен обновления не принадлежит текущему пользователю.'},
             )
+
+        # The token is owned by the caller. A token that is already blacklisted
+        # is an idempotent logout; a fresh token is blacklisted now.
+        if already_blacklisted:
+            return Response({'detail': 'Выполнен выход.'})
 
         refresh.blacklist()
         return Response({'detail': 'Выполнен выход.'})
@@ -221,20 +234,30 @@ class LogoutView(APIView):
     @staticmethod
     def _resolve_refresh_token(refresh_token):
         """
-        Resolve a valid (not-yet-blacklisted) RefreshToken instance.
+        Validate the JWT cryptographically and return ``(token, blacklisted)``.
 
-        Returns None when the token is already blacklisted (idempotent logout).
-        Raises InvalidToken (401) for malformed, expired, wrong-type or
-        otherwise unusable refresh tokens.
+        ``token`` is a ``RefreshToken`` when the supplied string is a usable
+        refresh token, otherwise an ``UntypedToken`` for tokens whose signature
+        and expiry are valid but whose type/blacklist state still need to be
+        decided by the caller. ``blacklisted`` is True only when the JWT is
+        already present in the blacklist.
+
+        Returns ``(RefreshToken, False)`` for a fresh refresh token.
+        Returns ``(UntypedToken, True)`` for an already-blacklisted JWT so the
+        caller can check ownership before returning idempotent success.
+        Returns ``(UntypedToken, False)`` for a wrong-type JWT (e.g. an access
+        token) so the caller can reject it as a 401.
+
+        Raises InvalidToken (401) for malformed, expired or otherwise unusable
+        JWTs.
         """
         try:
-            return RefreshToken(refresh_token)
+            return RefreshToken(refresh_token), False
         except TokenError:
-            # A blacklisted SimpleJWT refresh token is still cryptographically
-            # valid, but RefreshToken rejects it during blacklist verification.
-            # UntypedToken skips token-type verification and lets us detect the
-            # already-revoked case without treating malformed/expired tokens as
-            # a successful logout.
+            # RefreshToken() raises for malformed/expired/wrong-type tokens and
+            # for already-blacklisted refresh tokens. UntypedToken validates
+            # signature + exp + jti but skips type/blacklist checks, so we can
+            # inspect a blacklisted or wrong-type JWT before deciding status.
             try:
                 untyped = UntypedToken(refresh_token)
             except TokenError:
@@ -243,9 +266,7 @@ class LogoutView(APIView):
                 ) from None
 
             jti = untyped.get(api_settings.JTI_CLAIM)
-            if jti and BlacklistedToken.objects.filter(token__jti=jti).exists():
-                return None
-
-            raise InvalidToken(
-                {'detail': 'Токен обновления недействителен или истёк.'},
-            ) from None
+            already_blacklisted = bool(
+                jti and BlacklistedToken.objects.filter(token__jti=jti).exists()
+            )
+            return untyped, already_blacklisted
