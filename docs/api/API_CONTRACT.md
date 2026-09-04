@@ -961,7 +961,7 @@ Query parameters (parsed by hand, not by a serializer ⚠️ **GAP**):
 |---|---|
 | `product_id` | int; non-numeric → `400 {"product_id": …}`. |
 | `product_uuid` | UUID; ignored when `product_id` is present; malformed or unknown → empty result set (**not** `400`/`404`) ⚠️ **GAP**. |
-| `user_id` | int. **Silently coerced** to the caller's own id for non-staff users ⚠️ **GAP** (a request for another user's reviews returns *your* reviews). Anonymous callers get the canonical empty envelope, not a bare array. |
+| `user_id` | int. For authenticated non-staff callers, their own id is allowed; a different id returns `404` with the canonical API-04 `not_found` envelope. Staff callers may filter by any id. Anonymous callers get the canonical empty envelope, not a bare array. |
 | `rating`, `rating_gte`, `rating_lte` | int; non-numeric → `400`. No 1–5 range enforcement on `rating_gte`/`rating_lte`. |
 | `verified` | truthy tokens `true`/`1`/`yes` only; anything else is ignored. |
 | `ordering` | `rating`, `-rating`, `created_at`, `-created_at`, `helpful`; invalid values fall back to `-created_at` silently ⚠️ **GAP**. |
@@ -1212,6 +1212,7 @@ Endpoints applying the policy:
 | Wishlist item | ownership checked inside `WishlistService` |
 | Notification | ownership checked inside `NotificationService.mark_read` |
 | Review (unapproved) | invisible to anyone but its author and staff → `404` |
+| Review list `user_id` filter | authenticated non-staff requesting another user's id → canonical `404`; staff bypasses the filter restriction |
 | Discount apply/remove | `Order.objects.get(pk=…, user=request.user)` → `404` |
 
 **Staff bypass:** `is_staff` users bypass the ownership filter on orders,
@@ -1232,9 +1233,11 @@ payments and shipments (they see everything).
 everywhere else (§9.7 #42). No IDOR exists here; the difference is structural
 only, and no follow-up issue is attached.
 
-⚠️ **GAP:** `GET /api/v1/reviews/?user_id=<other>` silently rewrites the filter
-to the caller's own id instead of returning `403`/`404`/`400` — a third,
-undocumented behaviour for a non-owner request.
+✅ **CURRENT — review list ownership hiding.** For an authenticated non-staff
+caller, `GET /api/v1/reviews/?user_id=<other>` returns `404` with the canonical
+API-04 `not_found` envelope. The requested filter is not rewritten, and the
+response does not disclose whether the other user or reviews exist. Staff
+callers retain the administrative ability to filter by any `user_id`.
 
 ---
 
@@ -1383,7 +1386,7 @@ the API-02…API-07 scope statements.
 | G-13 | `int()` on `page`/`page_size` (reviews) and `limit` (analytics) without try/except → `500` on non-numeric input | §9.8, §9.13 | `page`/`page_size` closed by API-05; analytics `limit` remains **[F-1 (#66)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)** |
 | G-14 | Reviews list query parameters are hand-parsed; `ordering` and `product_uuid` fail silently instead of `400` | §9.8 | **API-05** (with [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)) |
 | G-15 | `?ordering=` invalid value silently falls back on catalog listing; `is_featured`/`status` query params are inert | §9.2 | **API-05** |
-| G-16 | `GET /reviews/?user_id=<other>` silently rewrites to the caller's id | §9.8, §10 | **[F-2 (#67)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/67)** |
+| G-16 | `GET /reviews/?user_id=<other>` silently rewrites to the caller's id | §9.8, §10 | **Closed by [#67](https://github.com/Kvasha62/Amazone_Clone_Production/issues/67)** — non-staff callers now receive canonical `404` / `not_found` |
 | G-18 | Public `/shipping/track/{tracking}/` is enumerable via sequential `SHP-` codes | §9.10 | **[F-4 (#69)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/69)** |
 | G-19 | `GET /shipping/methods/` requires authentication although it is reference data (blocks guest checkout) | §9.10 | **[F-5 (#70)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/70)** |
 | G-20 | No `Idempotency-Key` support; `POST /orders/` and `POST /payments/` are duplicable on retry | §11.2 | **API-07** |

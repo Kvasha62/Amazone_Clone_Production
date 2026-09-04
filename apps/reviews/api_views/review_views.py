@@ -154,10 +154,12 @@ class ReviewListView(APIView):
                 uid = int(user_id)
             except (ValueError, TypeError):
                 raise ValidationError({'user_id': 'Некорректный user_id.'})
-            # Не-staff видит только свои отзывы (если авторизован)
+            # Non-staff callers may filter only by their own user id. Return
+            # the same canonical 404 used for ownership hiding instead of
+            # silently changing the requested filter.
             if request.user.is_authenticated:
                 if not request.user.is_staff and uid != request.user.pk:
-                    uid = request.user.pk
+                    raise NotFound('Ресурс не найден.')
             else:
                 # Аноним не может запрашивать чужие отзывы
                 _, meta = paginate_queryset(Review.objects.none(), request)
