@@ -353,7 +353,9 @@ class CheckoutDeliveryCostAPITests(DeliveryPricingTestCase):
         )
 
         self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('delivery_cost', response.data)
+        self.assertEqual(response.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in response.data['error']['details']}
+        self.assertIn('delivery_cost', fields)
         self.assertFalse(Order.objects.filter(user=self.user).exists())
 
     def test_forged_higher_delivery_cost_is_rejected(self):
@@ -367,7 +369,9 @@ class CheckoutDeliveryCostAPITests(DeliveryPricingTestCase):
         )
 
         self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('delivery_cost', response.data)
+        self.assertEqual(response.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in response.data['error']['details']}
+        self.assertIn('delivery_cost', fields)
         self.assertFalse(Order.objects.filter(user=self.user).exists())
 
     def test_forged_zero_delivery_cost_is_rejected(self):
@@ -403,7 +407,9 @@ class CheckoutDeliveryCostAPITests(DeliveryPricingTestCase):
         response = self.client.post(self.url, {'delivery_cost': '1.00'})
 
         self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('delivery_cost', response.data)
+        self.assertEqual(response.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in response.data['error']['details']}
+        self.assertIn('delivery_cost', fields)
         self.assertFalse(Order.objects.filter(user=self.user).exists())
 
     # ── application/x-www-form-urlencoded (FormParser → QueryDict) ──
@@ -427,7 +433,9 @@ class CheckoutDeliveryCostAPITests(DeliveryPricingTestCase):
         response = self._post_urlencoded({'delivery_cost': '0.00'})
 
         self.assertEqual(response.status_code, 400, response.data)
-        self.assertIn('delivery_cost', response.data)
+        self.assertEqual(response.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in response.data['error']['details']}
+        self.assertIn('delivery_cost', fields)
         self.assertFalse(Order.objects.filter(user=self.user).exists())
 
     def test_forged_lower_delivery_cost_in_urlencoded_form_is_rejected(self):

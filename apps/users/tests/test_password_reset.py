@@ -142,31 +142,43 @@ class PasswordResetConfirmTests(TestCase):
         self.user.refresh_from_db()
         self.assertTrue(self.user.check_password(self.new_password))
 
+    def _assert_reset_client_error(self, resp):
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        error = resp.data['error']
+        self.assertEqual(error['code'], 'validation_error')
+        self.assertIsInstance(error['message'], str)
+        self.assertTrue(error['message'])
+        self.assertIsInstance(error['details'], list)
+        leaked = str(resp.data).lower()
+        self.assertNotIn('traceback', leaked)
+        self.assertNotIn('nameerror', leaked)
+        self.assertNotIn('binascii', leaked)
+
     def test_invalid_token_rejected(self):
-        """Invalid token → 400."""
+        """Invalid token → 400 canonical envelope."""
         resp = self.client.post(
             self.url,
             self._confirm_data(token='invalid-token-12345'),
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self._assert_reset_client_error(resp)
 
     def test_used_token_rejected(self):
-        """@Used token (after successful reset) → 400."""
+        """Used token (after successful reset) → 400 canonical envelope."""
         # First reset — succeeds
         self.client.post(self.url, self._confirm_data(), format='json')
         # Second reset with same token — fails
         resp = self.client.post(self.url, self._confirm_data(), format='json')
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self._assert_reset_client_error(resp)
 
     def test_invalid_uid_rejected(self):
-        """Invalid uid → 400."""
+        """Invalid uid → 400 canonical envelope."""
         resp = self.client.post(
             self.url,
             self._confirm_data(uid='invalid-uid'),
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self._assert_reset_client_error(resp)
 
     def test_passwords_mismatch_rejected(self):
         """Passwords do not match → 400."""
