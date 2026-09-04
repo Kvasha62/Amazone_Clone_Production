@@ -90,12 +90,15 @@ class PasswordResetRequestTests(TestCase):
             'apps.notifications.tasks.send_password_reset_email.delay',
             side_effect=RuntimeError('unexpected programming error'),
         ):
-            with self.assertRaises(RuntimeError):
-                self.client.post(
-                    self.url,
-                    {'email': 'reset@example.com'},
-                    format='json',
-                )
+            resp = self.client.post(
+                self.url,
+                {'email': 'reset@example.com'},
+                format='json',
+            )
+        self.assertEqual(resp.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(resp.data['error']['code'], 'server_error')
+        self.assertNotIn('unexpected programming error', str(resp.data))
+        self.assertNotIn('RuntimeError', str(resp.data))
 
 
 class PasswordResetConfirmTests(TestCase):

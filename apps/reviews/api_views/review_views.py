@@ -312,7 +312,7 @@ class ReviewListView(APIView):
             except Product.DoesNotExist:
                 raise NotFound('Товар не найден.')
         else:
-            raise NotFound('Укажите product_id или product_uuid.')
+            raise ValidationError('Укажите product_id или product_uuid.')
 
         review = ReviewService.create_review(
             user=request.user,

@@ -1,7 +1,6 @@
 import logging
 
-from rest_framework import status
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -91,10 +90,7 @@ class CouponRemoveView(APIView):
     def post(self, request):
         order_id = request.data.get('order_id')
         if not order_id:
-            return Response(
-                {'order_id': 'Обязательное поле.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError({'order_id': 'Обязательное поле.'})
 
         try:
             order = Order.objects.get(pk=order_id, user=request.user)

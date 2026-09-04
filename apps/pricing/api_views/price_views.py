@@ -16,6 +16,7 @@
 import logging
 
 from rest_framework import status
+from rest_framework.exceptions import NotFound
 # IsAdminUser — разрешает только request.user.is_staff=True.
 # 📖 https://www.django-rest-framework.org/api-guide/permissions/#isadminuser
 from rest_framework.permissions import IsAdminUser
@@ -67,18 +68,12 @@ class PriceDetailView(APIView):
         try:
             variant = ProductVariant.objects.get(pk=variant_id)
         except ProductVariant.DoesNotExist:
-            return Response(
-                {'detail': 'Вариант не найден.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            raise NotFound('Вариант не найден.')
 
         price_obj = PricingService.get_price(variant)
         if price_obj is None:
             # Цена не задана — это не ошибка, а отсутствие данных → 404.
-            return Response(
-                {'detail': 'Цена не задана.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            raise NotFound('Цена не задана.')
         return Response(PriceSerializer(price_obj).data)
 
     def post(self, request, variant_id: int):
@@ -90,10 +85,7 @@ class PriceDetailView(APIView):
         try:
             variant = ProductVariant.objects.get(pk=variant_id)
         except ProductVariant.DoesNotExist:
-            return Response(
-                {'detail': 'Вариант не найден.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            raise NotFound('Вариант не найден.')
 
         serializer = SetPriceInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -122,10 +114,7 @@ class PriceHistoryView(APIView):
         try:
             variant = ProductVariant.objects.get(pk=variant_id)
         except ProductVariant.DoesNotExist:
-            return Response(
-                {'detail': 'Вариант не найден.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            raise NotFound('Вариант не найден.')
 
         history = PricingService.get_price_history(variant)
         return Response(PriceHistorySerializer(history, many=True).data)

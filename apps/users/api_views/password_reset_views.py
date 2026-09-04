@@ -214,17 +214,11 @@ class PasswordResetConfirmView(APIView):
             pk = force_str(urlsafe_base64_decode(uid))
             user = User.objects.get(pk=pk, is_active=True)
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
-            return Response(
-                {'detail': 'Недействительная ссылка для сброса пароля.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError('Недействительная ссылка для сброса пароля.')
 
         # Проверяем токен
         if not default_token_generator.check_token(user, token):
-            return Response(
-                {'detail': 'Недействительный или просроченный токен.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError('Недействительный или просроченный токен.')
 
         # Устанавливаем новый пароль
         # 🔴 User наследует AbstractUser (НЕ BaseModel) — НЕТ updated_at

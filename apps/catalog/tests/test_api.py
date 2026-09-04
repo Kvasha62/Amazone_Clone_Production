@@ -155,8 +155,10 @@ class ProductBySlugsAPITests(CatalogAPITestCase):
             'ProductQuerySet.with_related',
             side_effect=RuntimeError('db query failed'),
         ):
-            with self.assertRaises(RuntimeError):
-                ProductBySlugsView.as_view()(request)
+            resp = ProductBySlugsView.as_view()(request)
+        self.assertEqual(resp.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(resp.data['error']['code'], 'server_error')
+        self.assertNotIn('db query failed', str(resp.data))
 
 
 # ==========================================================

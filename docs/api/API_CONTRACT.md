@@ -131,9 +131,8 @@ verify mechanically. Cosmetic only — no client-visible change proposed here.
 ⚠️ **GAP — two ways of expressing "staff only".** Most staff endpoints use
 `IsAdminUser` (→ `403` for a logged-in non-staff user, `401` for anonymous).
 `ProductCreateView` / `ProductUpdateView` use `IsAuthenticated` plus a manual
-`is_staff` check returning `{"detail": "Недостаточно прав."}` with `403`. The
-status codes coincide, but the error body differs from the DRF default.
-🔁 **FOLLOW-UP: API-04.**
+`is_staff` check. Status remains `403`; the body is the canonical envelope
+(`permission_denied`).
 
 ⚠️ **GAP — object-level permissions are enforced in views/services, not via
 DRF `has_object_permission`.** There is no shared `IsOwner` permission class;
@@ -146,8 +145,8 @@ each context re-implements ownership. See §10.
 * Per-view overrides: cart `30/min` anon / `120/min` user; orders `30/min` user;
   users profile & addresses `60/min` user.
 * Throttling is disabled in the test configuration (rates set to `None`).
-* Exceeding a rate yields `429 Too Many Requests` with DRF's
-  `{"detail": "…"}` body and a `Retry-After` header.
+* Exceeding a rate yields `429 Too Many Requests` with the canonical envelope
+  (`throttled`) and a `Retry-After` header.
 
 ### 3.4 API-03 authentication lifecycle ✅ **CURRENT / NORMATIVE**
 
@@ -195,7 +194,7 @@ distinguishes:
 | `POST /api/v1/auth/password-reset/confirm/` | Password-reset token          |
 
 **Deterministic authentication failure statuses (current implementation).**
-Exact error-body normalization is API-04 scope.
+Error bodies use the canonical envelope (§5).
 
 | Situation | Endpoint | Status |
 |---|---|---|
@@ -230,60 +229,105 @@ Exact error-body normalization is API-04 scope.
 * Language: user-facing `detail` messages are **Russian free text**. They are
   not stable identifiers.
 
-⚠️ **GAP — no machine-readable error codes.** Clients must branch on HTTP status
-plus field names, never on message text. 🔁 **FOLLOW-UP: API-04.**
+✅ **CURRENT (API-04)** — machine-readable `error.code` values are defined in §5.
+User-facing `error.message` / `details[].message` remain Russian (or DRF English
+for built-in validators) free text and are **not** stable identifiers.
 
 ---
 
-## 5. Global error conventions and known gaps
+## 5. Global error conventions (API-04) ✅ **CURRENT / NORMATIVE**
 
-### 5.1 What the framework produces ✅ **CURRENT**
+Public `/api/v1/` **resource** endpoints (every route in §9.1–§9.13, plus the
+payment webhook error path in §11.3) use one JSON error envelope. The handler
+is `apps.core.api_errors.exception_handler`, configured as DRF
+`EXCEPTION_HANDLER`. HTTP **status** semantics from API-03 and from the rest of
+this document are unchanged; only the **body** is normalized.
 
-No custom `EXCEPTION_HANDLER` is configured, so DRF's default handler applies:
+### 5.1 Canonical envelope
 
-| Situation | Status | Body |
+Content-Type: `application/json`.
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Запрос содержит некорректные данные.",
+    "details": [
+      {"field": "email", "code": "invalid", "message": "Enter a valid email address."}
+    ]
+  },
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+| Field | Required | Type | Semantics |
+|---|---|---|---|
+| `error` | yes | object | Envelope wrapper. |
+| `error.code` | yes | string | Machine-readable class of failure (see §5.2). Clients MUST branch on HTTP status + this code, never on `message` text. |
+| `error.message` | yes | string | Human-readable summary (Russian free text; **not** a stable identifier). |
+| `error.details` | yes | array | Always a list (possibly empty). Each item is `{field, code, message}`. `field` is a dotted/indexed path (`items[0].quantity`) or `null` for non-field errors. |
+| `request_id` | optional | string | Present when request-correlation middleware has a current id (`X-Request-ID`). Safe identifier only. |
+
+`details` is **always a list**. Clients must not assume a mapping of field →
+string or field → list at the top level.
+
+The envelope never contains exception class names, Python tracebacks, SQL,
+database errors, JWTs, passwords, reset tokens, webhook secrets, or other
+internals.
+
+### 5.2 HTTP status and `error.code` mapping
+
+| HTTP | `error.code` | When |
 |---|---|---|
-| Serializer validation failure | `400` | `{"<field>": ["msg", …], …}` and/or `{"non_field_errors": [...]}` |
-| `rest_framework.exceptions.ValidationError` raised in a service | `400` | dict or list, depending on how it was raised |
-| Missing/invalid/expired token on a protected endpoint | `401` | `{"detail": "…", "code": "…", "messages": [...]}` (SimpleJWT) |
-| Authenticated but not permitted | `403` | `{"detail": "You do not have permission to perform this action."}` |
-| `NotFound` raised (or unmatched route) | `404` | `{"detail": "…"}` |
-| Throttled | `429` | `{"detail": "Request was throttled. Expected available in N seconds."}` |
-| Unhandled exception | `500` | Django/DRF default; no JSON error contract guaranteed |
+| `400` | `validation_error` | Serializer / form / request validation; domain `ValidationError` (including business-rule conflicts). Malformed JSON → `parse_error`. |
+| `401` | `not_authenticated` | Missing credentials on an `IsAuthenticated` endpoint. |
+| `401` | `authentication_failed` | Invalid/expired/malformed JWT, bad login, inactive account, blacklisted/unowned refresh (API-03 statuses preserved). |
+| `403` | `permission_denied` | Authenticated caller lacks permission (staff checks, `IsAdminUser`, webhook HMAC failure). |
+| `404` | `not_found` | Missing resource **and** intentional ownership/IDOR hiding (§10). Status remains `404`, never `403`. |
+| `405` | `method_not_allowed` | Matched route, unsupported method (e.g. `PUT /api/v1/cart/`). |
+| `406` | `not_acceptable` | Unsatisfiable `Accept` on a JSON-only resource endpoint. |
+| `429` | `throttled` | Rate-limit exceeded (DRF throttles; `Retry-After` retained). Disabled in tests. |
+| `500` | `server_error` | Unexpected exception at the API boundary. Stable generic message; traceback only in server logs. |
+| `502` | `bad_gateway` | Payment webhook transient order-confirm failure (§11.3) — existing provider-retry signal. |
 
-### 5.2 What views produce by hand ⚠️ **GAP**
+**Not used (and not invented by API-04):**
 
-Several views bypass DRF exceptions and return ad-hoc payloads:
+* `409 Conflict` — business conflicts remain `400` / `validation_error`.
+* `422 Unprocessable Entity` — unused.
+* `415 Unsupported Media Type` — not part of the documented client contract.
 
-* `POST /api/v1/auth/register/` → `400` `{"email": "…"}` / `{"username": "…"}`
-  where the value is a **string**, not a list (DRF validation errors are lists).
-* `POST /api/v1/auth/change-password/` → `400` `{"old_password": "…"}` (string).
-* `POST /api/v1/auth/password-reset/confirm/` → `400` `{"detail": "…"}`.
-* `POST /api/v1/cart/merge/` → `400`/`404` `{"detail": "…"}`.
-* `POST /api/v1/catalog/products/create/`, `PATCH …/update/` → `403`
-  `{"detail": "Недостаточно прав."}`.
-* `GET/POST /api/v1/pricing/variants/{variant_id}/price/` → `404`
-  `{"detail": "Вариант не найден."}` / `{"detail": "Цена не задана."}`
-  returned directly rather than raised.
-* `POST /api/v1/discounts/remove/` → `400` `{"order_id": "Обязательное поле."}`
-  (hand-rolled required-field check, no serializer).
-* `POST /api/v1/payments/webhook/` → `403` / `200` / `502` custom `detail`
-  payloads (see §11).
+### 5.3 Validation representation
 
-**Consequence:** the *type* of a `400` field value is not stable across the API
-(sometimes `list[str]`, sometimes `str`). Clients must tolerate both.
-🔁 **FOLLOW-UP: API-04 (unified error contract).**
+Serializer and service `ValidationError`s flatten into `error.details`. Nested
+list/object errors use indexed paths. Duplicate email/username on register,
+wrong `old_password`, missing `order_id` on coupon remove, and catalog query
+`min_price=abc` all use this shape with HTTP `400`.
 
-### 5.3 Status codes that are *not* currently used
+`POST /api/v1/reviews/` without `product_id`/`product_uuid` is a **validation**
+failure → `400` (G-29 closed). Unknown product remains `404`.
 
-* `409 Conflict` — never returned. Business conflicts (invalid FSM transition,
-  already-cancelled order, coupon exhausted, insufficient stock) surface as
-  `400` from `ValidationError`. ❓ **DECISION REQUIRED:** keep `400` for all
-  business-rule conflicts, or introduce `409` for state conflicts (API-04).
-* `405` is produced by DRF automatically for a method not implemented on a
-  matched route (e.g. `PUT /api/v1/cart/`).
-* `502 Bad Gateway` is used by exactly one endpoint (payment webhook, §11).
-* `503` is used by exactly one endpoint (health, §9.14).
+### 5.4 Authentication / authorization
+
+API-03 status table in §3.4 is unchanged. Bodies are the canonical envelope.
+Permission denials (including catalog product create/update non-staff) use
+`403` + `permission_denied`. Ownership failures stay `404` + `not_found`.
+
+### 5.5 Unexpected failures
+
+Unhandled exceptions are logged (`api_unhandled_exception`, with traceback on
+the server) and returned as `500` + `server_error` with empty `details` and no
+internal text. They are not converted into `400`.
+
+### 5.6 Exceptions to the envelope
+
+* **`GET /api/v1/health/`** (§9.14) is a plain Django `View`. `200`/`503`
+  bodies stay `{status, version, database}` — not the error envelope.
+* **`GET /api/v1/schema/`** and **`GET /api/v1/docs/`** (§9.15) are schema/docs
+  endpoints, not API resources.
+* **Payment webhook success-path `200`** payloads (`PaymentSerializer`, or
+  `{detail: "Платёж не найден, webhook logged."}` / completed-order notice)
+  are **not** errors. Webhook **failures** (`403` HMAC, `400` validation,
+  `502` retry) use the envelope.
 
 ---
 
@@ -454,14 +498,13 @@ Body (the **inline** `RegisterInputSerializer` declared in
 The view uses the inline one, so **`phone` is not accepted at registration**;
 the exported serializer is dead code that misrepresents the contract.
 `201` → `{"id": int, "email", "username", "first_name", "last_name"}`.
-`400`: validation errors; mismatched passwords →
-`{"password_confirm": ["Пароли не совпадают."]}`; duplicate email/username →
-`{"email": "…"}` / `{"username": "…"}` as a **string** ⚠️ **GAP** (§5.2).
+`400`: canonical validation envelope (§5); mismatched passwords → details on
+`password_confirm`; duplicate email/username → details on `email` / `username`.
 Email uniqueness is case-insensitive (`email__iexact`). Not idempotent.
 
 **2. `POST /auth/login/`** — Public. Body `{"email", "password"}`.
 `200` → `{"access": "<jwt>", "refresh": "<jwt>"}`. `401` on bad credentials or
-inactive user (`{"detail": "No active account found with the given credentials"}`).
+inactive user (canonical envelope, `authentication_failed`).
 Authentication classes are empty on this view (`permission_classes = []` in the
 resolved route), so an existing token is ignored.
 
@@ -485,7 +528,8 @@ the body → `400`.
 **5. `POST /auth/change-password/`** — Auth.
 Body `old_password`, `new_password` (≥8), `new_password_confirm`.
 `200` → `{"detail": "Пароль успешно изменён."}`.
-`400` on mismatch or wrong current password (`{"old_password": "…"}`, string).
+`400` on mismatch or wrong current password (canonical envelope, field
+`old_password` / `new_password_confirm`).
 ✅ **CURRENT (API-03)** — existing access and refresh tokens are **not**
 individually invalidated by a password change. They remain valid until
 expiration / rotation / logout / explicit refresh-token expiry. A new password
@@ -501,8 +545,7 @@ Idempotent from the client's perspective; each call mints a new token.
 Body `uid` (urlsafe-base64 of the user PK), `token` (Django default token
 generator), `new_password` (8–128), `new_password_confirm`.
 `200` → `{"detail": "Пароль успешно изменён."}`.
-`400` → `{"detail": "Недействительная ссылка для сброса пароля."}` (bad uid) or
-`{"detail": "Недействительный или просроченный токен."}`. Token validity is
+`400` canonical envelope (invalid uid / expired token). Token validity is
 governed by `PASSWORD_RESET_TIMEOUT`. Single-use in effect: the token stops
 validating once the password hash changes.
 ✅ **CURRENT (API-03)** — existing access and refresh tokens are **not**
@@ -593,8 +636,8 @@ omitted silently.
 Body `CreateProductInputSerializer`: `name` (≤255), `brand_id` (int ≥ 1),
 `primary_category_id` (int ≥ 1), `description`, `manufacturer_code`, `status`
 (choice), `is_featured`, `category_ids` (list[int]), `tag_ids` (list[int]).
-`201` → `ProductDetailSerializer`. `403` `{"detail": "Недостаточно прав."}` for
-non-staff (⚠️ non-DRF body). `400` on validation; `404` if a referenced brand or
+`201` → `ProductDetailSerializer`. `403` canonical `permission_denied` for
+non-staff. `400` on validation; `404` if a referenced brand or
 category does not exist. Slug and UUID are generated server-side. Not idempotent.
 
 **15. `GET /catalog/products/{identifier}/`** — Public. `identifier` is a UUID
@@ -664,8 +707,8 @@ item does not belong to the caller's cart (ownership enforced in
 `204`) ⚠️ **GAP**. `404` if not owned.
 **26. `POST /cart/merge/`** — Auth, empty body. Merges the guest cart identified
 by the current `session_key` into the user's cart.
-`200` → merged cart; `400 {"detail": "Сессия гостя не найдена."}` when the
-request carries no session; `404 {"detail": "Гостевая корзина не найдена."}`.
+`200` → merged cart; `400` when the request carries no session; `404` when the
+guest cart is missing (canonical envelope).
 Required because JWT login does not fire `user_logged_in`. Effectively
 idempotent (a second call finds no guest cart → `404`).
 ⚠️ **GAP:** merge depends on a cookie-backed session travelling alongside a
@@ -871,8 +914,7 @@ Only approved reviews are listed. Response items are `ReviewListSerializer`
 
 **48. `POST /reviews/`** — Auth. Body `product_id` **or** `product_uuid`,
 `rating` (1–5), `text`, `title?`. `201` → `ReviewSerializer`. Unknown product →
-`404`; neither identifier supplied → **`404`** `{"detail": "Укажите product_id
-или product_uuid."}` — a validation error returned as `404` ⚠️ **GAP**.
+`404`; neither identifier supplied → **`400`** validation envelope.
 Duplicate review by the same user for the same product → `400` from the service.
 
 **49–51. `/reviews/{review_id}/`.** `GET` is public but an unapproved review is
@@ -906,7 +948,7 @@ coupons. Not paginated ⚠️ **GAP**.
 a **bespoke mini-payload**, not the order representation ⚠️ **GAP**.
 `400` for an invalid/expired/exhausted coupon or an unmet minimum.
 **55.** Body `{"order_id": int}` validated by hand →
-`400 {"order_id": "Обязательное поле."}` when missing ⚠️ **GAP**.
+`400` canonical envelope with `order_id` in `details` when missing.
 `200` → same mini-payload. Idempotent.
 **56.** Body `{"code": str, "order_amount": decimal}` → `200`
 `{code, discount_type, discount_value, max_discount, calculated_discount,
@@ -1172,8 +1214,8 @@ timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
   `X-Webhook-Signature` header as lowercase hex, compared with
   `hmac.compare_digest` (timing-safe) against `settings.PAYMENT_WEBHOOK_SECRET`.
 * **Fail-closed:** if `PAYMENT_WEBHOOK_SECRET` is unset/empty, or the header is
-  missing, or the digest does not match → `403 {"detail": "Invalid payment
-  webhook signature."}`. Neither the secret nor the signature is ever logged.
+  missing, or the digest does not match → `403` canonical `permission_denied`.
+  Neither the secret nor the signature is ever logged.
 * **Body** (`HandleWebhookInputSerializer`): `external_id` (str, required),
   `event_type` (str, required), `status` (choice, required), `payload`
   (JSON object, optional). Invalid → `400`.
@@ -1183,9 +1225,8 @@ timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
 * **Order already finished** (`delivered`/`cancelled`): the payment is failed
   and a `PaymentEvent` is recorded; response `200 {"detail": "Заказ завершён;
   платёж отклонён."}`.
-* **Transient order-confirmation failure:** `502 {"detail": "Подтверждение
-  заказа не удалось; повторите запрос позже."}` — an explicit *retry me* signal
-  to the provider. This is the only `502` in the API.
+* **Transient order-confirmation failure:** `502` canonical `bad_gateway` —
+  an explicit *retry me* signal to the provider. This is the only `502` in the API.
 * **Idempotency/replay:** `Payment.external_id` carries a **unique constraint**
   (migration `payments/0004_payment_external_id_unique`), and repeated webhooks
   for the same `external_id` are absorbed by `PaymentService.handle_webhook`
@@ -1263,12 +1304,12 @@ the API-02…API-07 scope statements.
 | G-1 | Three different collection shapes (DRF envelope / bespoke reviews envelope / bare array) and 11 unbounded non-paginated collections | §6 | **API-05** |
 | G-2 | `page_size` accepted but ignored on catalog listing; not supported elsewhere | §9.2 | **API-05** |
 | G-3 | Reviews list changes shape within one endpoint (`ordering=helpful` drops `total_pages`; anonymous `user_id` returns a bare array) | §9.8 | **API-05** |
-| G-4 | `400` bodies are sometimes `{"field": ["msg"]}` and sometimes `{"field": "msg"}` | §5.2 | **API-04** |
-| G-5 | No machine-readable error codes; messages are Russian free text | §4, §5 | **API-04** |
-| G-6 | Business conflicts return `400`; `409` is never used | §5.3 | **API-04** |
-| G-7 | Custom `403` body for catalog staff checks instead of the DRF default | §3.2 | **API-04** |
-| G-8 | `DELETE` semantics inconsistent: `204` (address/review/wishlist) vs `200`+body (cart, cart item) vs `200`+`detail` soft delete (`/users/me/`) | §9.1, §9.3 | **API-04** |
-| G-9 | Creating actions return mixed `200`/`201` | §11.1 | **API-04** |
+| G-4 | `400` bodies mixed string vs list | §5 | **Closed by API-04** (canonical `details` list) |
+| G-5 | No machine-readable error codes | §4, §5 | **Closed by API-04** (`error.code`) |
+| G-6 | Business conflicts return `400`; `409` unused | §5.2 | **Closed by API-04** (`409` remains unused by design) |
+| G-7 | Custom `403` body for catalog staff checks | §3.2 | **Closed by API-04** (canonical envelope) |
+| G-8 | `DELETE` semantics inconsistent: `204` vs `200`+body | §9.1, §9.3 | Out of API-04 error-envelope scope (success statuses) |
+| G-9 | Creating actions return mixed `200`/`201` | §11.1 | Out of API-04 error-envelope scope |
 | G-10 | Guest-cart merge (`/cart/merge/`) couples JWT to a cookie session; password change/reset intentionally keeps existing JWTs/refresh tokens valid (API-03 freeze) | §3.4, §9.3 | Separate auth/cookie follow-up outside API-03 |
 | G-11 | Unauthenticated `/api/v1/schema/` and `/api/v1/docs/` in production | §9.15 | **API-02** |
 | G-12 | Optional `drf_spectacular` imports make schema generation best-effort; no committed artifact, no CI validation | §12 | **API-02** |
@@ -1284,10 +1325,10 @@ the API-02…API-07 scope statements.
 | G-23 | Identifier drift: catalog `id` is a UUID; cross-context order references use the integer PK while order URLs use `order_number`; shipments expose a raw PK | §7 | **[F-8 (#73)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/73)** |
 | G-24 | Notification list vs unread list return different representations of the same resource | §9.12 | **API-05** |
 | G-25 | Analytics views bypass their own serializers; `metric`/`period` unvalidated | §9.13 | **API-02** (schema) + [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66) |
-| G-26 | Bespoke mini-payloads for discounts apply/remove and wishlist move-to-cart instead of the affected resource | §9.9, §9.11 | **API-04** |
+| G-26 | Bespoke mini-payloads for discounts apply/remove and wishlist move-to-cart | §9.9, §9.11 | Out of API-04 error-envelope scope |
 | G-27 | `/api/v1/health/` is outside DRF and outside OpenAPI; `version` is hard-coded | §9.14 | **[F-9 (#74)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/74)** |
 | G-28 | No currency field on order/payment/shipping money; single implicit currency | §8.1 | **[F-10 (#75)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/75)** |
-| G-29 | `POST /reviews/` returns `404` for a missing-identifier validation error | §9.8 | **API-04** |
+| G-29 | `POST /reviews/` returns `404` for a missing-identifier validation error | §9.8 | **Closed by API-04** (`400`) |
 | G-30 | `GET /orders/` has no staff-wide variant; `PATCH /orders/{n}/status/` is staff-only but there is no way for staff to list all orders via the API | §9.4 | **[F-11 (#76)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/76)** |
 | G-31 | `POST /shipping/shipments/create/` instead of `POST /shipping/shipments/`; `POST …/tracking/` vs `PATCH …/status/`; `POST /wishlist/clear/` vs `DELETE /cart/` | §9.10, §9.11 | **API-04** |
 | G-31a | Duplicate `RegisterInputSerializer` (inline view copy vs exported module copy declaring `phone`); the exported one is dead code | §9.1 | **[F-12 (#77)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/77)** |
@@ -1317,7 +1358,7 @@ API v1 **cannot be frozen** until the following are closed:
 |---|---|
 | **API-02 — OpenAPI contract** | Remove the optional `drf_spectacular` import fallbacks so schema generation is mandatory; annotate every response (no string-literal responses); document query parameters; include health; commit and CI-validate a schema artifact; decide on protecting `/schema/` and `/docs/`; invert the precedence rule in §12. Closes G-11, G-12, G-25. |
 | **API-03 — Authentication contract** | Logout / refresh-token revocation; explicit access-token no-blacklist policy; deterministic password change/reset lifecycle; account deactivation behaviour. Closes the logout portion of G-10; the `/cart/merge/` cookie coupling remains a separate follow-up. |
-| **API-04 — Error contract** | One error envelope with stable machine-readable codes; `400` body type consistency; `409` decision; `DELETE`/creation status-code normalization; replace bespoke mini-payloads. Closes G-4…G-9, G-26, G-29, G-31. |
+| **API-04 — Error contract** | One error envelope with stable machine-readable codes; `400` body type consistency; `409` remains unused by design; production-safe `5xx`. Closes G-4, G-5, G-6, G-7, G-29. Success-path G-8/G-9/G-26/G-31 are out of this ticket. |
 | **API-05 — Collection/pagination contract** | One pagination envelope; `page_size` as a first-class parameter; paginate the 11 unbounded collections; unify notification representations; validate list query parameters. Closes G-1, G-2, G-3, G-14, G-15, G-24. |
 | **API-06 — API integration/contract tests** | Executable tests asserting every claim in §9 (status codes, shapes, ownership `404`s, pagination envelopes, webhook signature handling), so the contract cannot silently drift. |
 | **API-07 — End-to-end business scenarios** | Idempotency keys for order and payment creation; the full guest→cart→order→payment→shipment→review journey as a contract-level scenario. Closes G-20. |
