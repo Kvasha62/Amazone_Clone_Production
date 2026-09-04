@@ -67,6 +67,28 @@ class FlattenDetailsTests(TestCase):
         self.assertIn("items[0].quantity", fields)
         self.assertIn(None, fields)
 
+    def test_simplejwt_messages_are_not_field_paths(self):
+        details = flatten_error_details(
+            {
+                "detail": "Given token not valid for any token type",
+                "messages": [
+                    {
+                        "token_class": "AccessToken",
+                        "token_type": "access",
+                        "message": "Token is invalid or expired",
+                    }
+                ],
+            }
+        )
+        fields = [item["field"] for item in details]
+        self.assertEqual(fields, [None])
+        self.assertTrue(
+            all("messages" not in str(item["field"]) for item in details)
+        )
+        leaked = str(details).lower()
+        self.assertNotIn("token_class", leaked)
+        self.assertNotIn("accesstoken", leaked)
+
 
 class UsersErrorContractTests(TestCase):
     def setUp(self):

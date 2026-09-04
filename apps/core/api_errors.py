@@ -74,6 +74,11 @@ _SAFE_DEFAULT_MESSAGES = {
     CODE_BAD_GATEWAY: "Временный сбой обработки запроса.",
 }
 
+# SimpleJWT InvalidToken puts diagnostic metadata under ``messages``
+# (token_class / token_type / inner message).  Those are not request
+# field paths and must not become ``error.details[].field``.
+_NON_FIELD_METADATA_KEYS = frozenset({"messages"})
+
 _SENSITIVE_FIELD_NAMES = frozenset(
     {
         "password",
@@ -127,7 +132,7 @@ def flatten_error_details(data: Any, prefix: str | None = None) -> list[dict[str
 
     Nested serializer errors use dotted / indexed field paths
     (``items[0].quantity``).  ``non_field_errors`` become details with
-    ``field: null``.
+    ``field: null``.  SimpleJWT ``messages`` metadata is skipped.
     """
 
     items: list[dict[str, Any]] = []
@@ -136,6 +141,8 @@ def flatten_error_details(data: Any, prefix: str | None = None) -> list[dict[str
 
     if isinstance(data, dict):
         for key, value in data.items():
+            if key in _NON_FIELD_METADATA_KEYS:
+                continue
             if key in ("detail", "non_field_errors"):
                 child_prefix = prefix
             elif prefix:
