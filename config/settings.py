@@ -489,6 +489,14 @@ SIMPLE_JWT = {
     # Нужно указать, что поле для входа — email.
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
+    # API-03: inactive users are rejected on every authenticated request.
+    # Access tokens are not individually blacklisted; the account check is the
+    # immediate revocation boundary for deactivated accounts.
+    "CHECK_USER_IS_ACTIVE": True,
+    # API-03: existing JWTs and refresh tokens are NOT invalidated by password
+    # change/reset. This is deliberate current behaviour; revocation is through
+    # rotation, logout and expiry only (no token-family redesign in API-03).
+    "CHECK_REVOKE_TOKEN": False,
 }
 
 # ==========================================================
