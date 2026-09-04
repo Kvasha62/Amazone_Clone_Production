@@ -2,7 +2,8 @@
 
 **Status:** Normative, pre-freeze draft of the *current* API v1 contract.
 **Scope:** Every public `/api/v1/` endpoint served by this repository.
-**Issue:** API-01 — Formalize API v1 contract.
+**Issue:** API-01 — Formalize API v1 contract; API-03 — Authentication & JWT
+lifecycle contract (§3.4).
 **Evidence base:** `config/urls.py`, `apps/*/urls.py`, `apps/*/api_views/**`,
 `apps/*/serializers/**`, `apps/*/services/**`, `config/settings.py`
 (commit base: `main` @ `45fa9b7`).
@@ -113,16 +114,10 @@ verify mechanically. Cosmetic only — no client-visible change proposed here.
 * Token lifetimes (`SIMPLE_JWT`): access **15 minutes**, refresh **7 days**.
 * `ROTATE_REFRESH_TOKENS = True` and `BLACKLIST_AFTER_ROTATION = True`: each
   successful refresh returns a *new* refresh token and blacklists the old one.
+* Logout: `POST /api/v1/auth/logout/` blacklists the supplied refresh token.
+  The access token is **not** blacklisted (see §3.4).
 * Sessions: Django sessions still exist and are used **only** for the guest cart
   (`session_key`) and for `/admin/`. API authentication itself is stateless.
-
-⚠️ **GAP — no logout endpoint.** There is no `/api/v1/auth/logout/`. Refresh
-tokens can only be invalidated by rotation or expiry; a client "logout" is
-purely a client-side token discard. 🔁 **FOLLOW-UP: API-03.**
-
-❓ **DECISION REQUIRED.** Whether logout must blacklist the presented refresh
-token (`rest_framework_simplejwt.token_blacklist` is installed and its admin
-models are registered) or whether client-side discard is the frozen contract.
 
 ### 3.2 Permission tiers ✅ **CURRENT**
 
@@ -153,6 +148,67 @@ each context re-implements ownership. See §10.
 * Throttling is disabled in the test configuration (rates set to `None`).
 * Exceeding a rate yields `429 Too Many Requests` with DRF's
   `{"detail": "…"}` body and a `Retry-After` header.
+
+### 3.4 API-03 authentication lifecycle ✅ **CURRENT / NORMATIVE**
+
+API-03 freezes the authentication lifecycle independently of the error-body
+contract (API-04) and the general authorization model. The contract explicitly
+distinguishes:
+
+1. **Authentication** — a caller proves identity with a JWT
+   (`Authorization: Bearer <access_token>`); login is by **email**; Django
+   sessions are not used for API authentication.
+2. **Authorization/ownership** — authentication only establishes identity.
+   Ownership (e.g. an address owned by another user → `404`) is enforced by the
+   relevant views/services and remains outside this section.
+3. **Refresh-token revocation** — the refresh token is the revocable
+   capability. Successful refresh rotates it (`ROTATE_REFRESH_TOKENS=True`,
+   `BLACKLIST_AFTER_ROTATION=True`); a rotated token is blacklisted. Logout
+   blacklists the presented refresh token. A blacklisted refresh token cannot
+   be reused to obtain a new access token.
+4. **Access-token expiration** — access tokens are **not** blacklisted on
+   logout. They remain valid until their 15-minute expiration, subject to the
+   normal authentication checks (including active-account checks).
+5. **Password change/reset effects** — password changes do **not** create a new
+   authentication mechanism and do **not** individually blacklist existing
+   JWTs (`SIMPLE_JWT["CHECK_REVOKE_TOKEN"]` is `False`). Existing access tokens
+   remain valid until expiration and existing refresh tokens remain revocable
+   only through rotation/logout/expiry. This is the current implementation and
+   is frozen by API-03.
+6. **Account deactivation effects** — `DELETE /api/v1/users/me/` sets
+   `is_active=False`. Inactive users cannot log in, cannot obtain new tokens,
+   and cannot refresh. Because SimpleJWT checks `is_active` during
+   authentication (`SIMPLE_JWT["CHECK_USER_IS_ACTIVE"]` is `True`), an
+   already-issued access token for a deactivated user is rejected on the next
+   authenticated request. No separate access-token blacklist is introduced.
+
+**Public authentication endpoints and required credential:**
+
+| Endpoint                                    | Authentication                |
+| ------------------------------------------- | ----------------------------- |
+| `POST /api/v1/auth/register/`               | Anonymous                     |
+| `POST /api/v1/auth/login/`                  | Anonymous                     |
+| `POST /api/v1/auth/refresh/`                | Refresh token                 |
+| `POST /api/v1/auth/logout/`                 | Authenticated + refresh token |
+| `POST /api/v1/auth/change-password/`        | Authenticated                 |
+| `POST /api/v1/auth/password-reset/`         | Anonymous                     |
+| `POST /api/v1/auth/password-reset/confirm/` | Password-reset token          |
+
+**Deterministic authentication failure statuses (current implementation).**
+Exact error-body normalization is API-04 scope.
+
+| Situation | Endpoint | Status |
+|---|---|---|
+| Missing access token | any `IsAuthenticated` endpoint, logout | `401` |
+| Malformed/expired access token | any `IsAuthenticated` endpoint | `401` |
+| Invalid login credentials | login | `401` |
+| Missing/malformed login body | login | `400` |
+| Inactive user | login / refresh / authenticated request | `401` |
+| Malformed/expired refresh token | refresh / logout | `401` |
+| Blacklisted refresh token | refresh | `401` |
+| Already-blacklisted refresh token (repeat logout) | logout | `200` (idempotent) |
+| Missing `refresh` field | logout | `400` |
+| Refresh token not owned by caller | logout | `401` |
 
 ---
 
@@ -365,7 +421,9 @@ first-class query parameter.
 
 ## 9. Endpoint inventory
 
-Legend: **Auth** = Public / Auth / Staff. All paths are absolute and require the
+Legend: **Auth** = Public / Auth / Staff; **Refresh token** and
+**Password-reset token** are credential-specific authentication tiers used by
+the authentication endpoints (§3.4). All paths are absolute and require the
 trailing slash. Unless noted, `401` applies to Auth/Staff endpoints when the
 token is absent/invalid, `403` when the caller is authenticated but not
 permitted, and `429` when throttled.
@@ -376,14 +434,15 @@ permitted, and `429` when throttled.
 |---|---|---|---|
 | 1 | POST | `/api/v1/auth/register/` | Public |
 | 2 | POST | `/api/v1/auth/login/` | Public |
-| 3 | POST | `/api/v1/auth/refresh/` | Public |
-| 4 | POST | `/api/v1/auth/change-password/` | Auth |
-| 5 | POST | `/api/v1/auth/password-reset/` | Public |
-| 6 | POST | `/api/v1/auth/password-reset/confirm/` | Public |
-| 7 | GET/PATCH/DELETE | `/api/v1/users/me/` | Auth |
-| 8 | GET/POST | `/api/v1/users/addresses/` | Auth |
-| 9 | GET/PATCH/DELETE | `/api/v1/users/addresses/{address_id}/` | Auth |
-| 10 | POST | `/api/v1/users/addresses/{address_id}/default/` | Auth |
+| 3 | POST | `/api/v1/auth/refresh/` | Refresh token |
+| 4 | POST | `/api/v1/auth/logout/` | Auth + refresh token |
+| 5 | POST | `/api/v1/auth/change-password/` | Auth |
+| 6 | POST | `/api/v1/auth/password-reset/` | Public |
+| 7 | POST | `/api/v1/auth/password-reset/confirm/` | Password-reset token |
+| 8 | GET/PATCH/DELETE | `/api/v1/users/me/` | Auth |
+| 9 | GET/POST | `/api/v1/users/addresses/` | Auth |
+| 10 | GET/PATCH/DELETE | `/api/v1/users/addresses/{address_id}/` | Auth |
+| 11 | POST | `/api/v1/users/addresses/{address_id}/default/` | Auth |
 
 **1. `POST /auth/register/`** — Public.
 Body (the **inline** `RegisterInputSerializer` declared in
@@ -406,26 +465,39 @@ inactive user (`{"detail": "No active account found with the given credentials"}
 Authentication classes are empty on this view (`permission_classes = []` in the
 resolved route), so an existing token is ignored.
 
-**3. `POST /auth/refresh/`** — Public (SimpleJWT `TokenRefreshView`).
+**3. `POST /auth/refresh/`** — Refresh token (SimpleJWT `TokenRefreshView`).
 Body `{"refresh"}`. `200` → `{"access", "refresh"}` (rotation is on, so a new
 refresh token is issued and the old one is blacklisted). `401` on an expired,
 malformed or blacklisted token. **Not idempotent** — replaying the same refresh
 token after rotation fails with `401`.
 
-**4. `POST /auth/change-password/`** — Auth.
+**4. `POST /auth/logout/`** — Auth + refresh token.
+Body `{"refresh": "<refresh_token>"}`.
+`200` → `{"detail": "Выполнен выход."}`. The supplied refresh token is
+blacklisted; subsequent refresh with that token fails. The access token is
+**not** blacklisted and remains valid until its 15-minute expiration.
+The client is responsible for discarding local tokens.
+Repeat logout with an already-blacklisted refresh token returns `200`
+(idempotent). `401` on a malformed/expired refresh token, a refresh token not
+owned by the caller, or a missing/invalid access token. Missing `refresh` in
+the body → `400`.
+
+**5. `POST /auth/change-password/`** — Auth.
 Body `old_password`, `new_password` (≥8), `new_password_confirm`.
 `200` → `{"detail": "Пароль успешно изменён."}`.
 `400` on mismatch or wrong current password (`{"old_password": "…"}`, string).
-⚠️ **GAP** — existing tokens are **not** invalidated after a password change.
-🔁 **FOLLOW-UP: API-03.**
+✅ **CURRENT (API-03)** — existing access and refresh tokens are **not**
+individually invalidated by a password change. They remain valid until
+expiration / rotation / logout / explicit refresh-token expiry. A new password
+becomes usable for the next login.
 
-**5. `POST /auth/password-reset/`** — Public. Body `{"email"}`.
+**6. `POST /auth/password-reset/`** — Public. Body `{"email"}`.
 Always `200` → `{"detail": "Если email существует, письмо отправлено."}`
 (deliberate account-enumeration protection). Email delivery is dispatched via
 Celery, falling back to synchronous `send_mail` on broker/import failure.
 Idempotent from the client's perspective; each call mints a new token.
 
-**6. `POST /auth/password-reset/confirm/`** — Public.
+**7. `POST /auth/password-reset/confirm/`** — Password-reset token.
 Body `uid` (urlsafe-base64 of the user PK), `token` (Django default token
 generator), `new_password` (8–128), `new_password_confirm`.
 `200` → `{"detail": "Пароль успешно изменён."}`.
@@ -433,8 +505,11 @@ generator), `new_password` (8–128), `new_password_confirm`.
 `{"detail": "Недействительный или просроченный токен."}`. Token validity is
 governed by `PASSWORD_RESET_TIMEOUT`. Single-use in effect: the token stops
 validating once the password hash changes.
+✅ **CURRENT (API-03)** — existing access and refresh tokens are **not**
+individually invalidated by a password reset, matching the password-change
+lifecycle.
 
-**7. `/users/me/`** — Auth.
+**8. `/users/me/`** — Auth.
 `GET` `200` → `UserDetailSerializer`: `id`, `email`, `username`, `first_name`,
 `last_name`, `full_name`, `phone`, `is_active`, `date_joined`,
 `profile{avatar, date_of_birth, gender, timezone, language, email_subscribed}`.
@@ -448,7 +523,7 @@ declared `required=False`, so partial updates work.
 `DELETE` returning `200` with a body deviates from the `204` convention used by
 address/review/wishlist deletes.
 
-**8. `/users/addresses/`** — Auth.
+**9. `/users/addresses/`** — Auth.
 `GET` `200` → **bare array** of `AddressOutputSerializer`
 (`id`, `recipient_name`, `country`, `region`, `city`, `street`, `postal_code`,
 `notes`, `is_default`, `created_at`, `updated_at`), default address first, then
@@ -457,12 +532,12 @@ by date. Not paginated (§6 class C).
 `city`, `street`, `postal_code`, `notes`, `is_default`) → `201` with the created
 address. `400` when the per-user address limit is exceeded.
 
-**9. `/users/addresses/{address_id}/`** — Auth, `address_id` int.
+**10. `/users/addresses/{address_id}/`** — Auth, `address_id` int.
 `GET` `200`; `PATCH` (partial) `200`; `DELETE` `204` (no body).
 **Ownership:** lookups are scoped by `user=request.user`; another user's address
 yields `404 {"detail": "Адрес не найден."}` — never `403` (§10).
 
-**10. `POST /users/addresses/{address_id}/default/`** — Auth.
+**11. `POST /users/addresses/{address_id}/default/`** — Auth.
 `200` → the address, now `is_default=true`; all other addresses of the user are
 demoted. **Idempotent**: repeating the call is a no-op returning `200`.
 `404` if not owned.
@@ -471,17 +546,17 @@ demoted. **Idempotent**: repeating the call is a no-op returning `200`.
 
 | # | Method | Path | Auth |
 |---|---|---|---|
-| 11 | GET | `/api/v1/catalog/products/` | Public |
-| 12 | GET | `/api/v1/catalog/products/by-slugs/` | Public |
-| 13 | POST | `/api/v1/catalog/products/create/` | Staff (inline check) |
-| 14 | GET | `/api/v1/catalog/products/{identifier}/` | Public |
-| 15 | PATCH | `/api/v1/catalog/products/{uuid}/update/` | Staff (inline check) |
-| 16 | GET | `/api/v1/catalog/categories/` | Public |
-| 17 | GET | `/api/v1/catalog/categories/{slug}/` | Public |
-| 18 | GET | `/api/v1/catalog/brands/` | Public |
-| 19 | GET | `/api/v1/catalog/brands/{slug}/` | Public |
+| 12 | GET | `/api/v1/catalog/products/` | Public |
+| 13 | GET | `/api/v1/catalog/products/by-slugs/` | Public |
+| 14 | POST | `/api/v1/catalog/products/create/` | Staff (inline check) |
+| 15 | GET | `/api/v1/catalog/products/{identifier}/` | Public |
+| 16 | PATCH | `/api/v1/catalog/products/{uuid}/update/` | Staff (inline check) |
+| 17 | GET | `/api/v1/catalog/categories/` | Public |
+| 18 | GET | `/api/v1/catalog/categories/{slug}/` | Public |
+| 19 | GET | `/api/v1/catalog/brands/` | Public |
+| 20 | GET | `/api/v1/catalog/brands/{slug}/` | Public |
 
-**11. `GET /catalog/products/`** — Public. **Paginated (DRF shape, §6 class A).**
+**12. `GET /catalog/products/`** — Public. **Paginated (DRF shape, §6 class A).**
 Query parameters (validated by `ProductListQuerySerializer`; unknown parameters
 are ignored):
 
@@ -507,14 +582,14 @@ are ignored):
 ⚠️ **GAP:** the service computes `applied_filters` but the view discards it —
 the response carries no echo of the applied filters.
 
-**12. `GET /catalog/products/by-slugs/?slugs=a,b,c`** — Public.
+**13. `GET /catalog/products/by-slugs/?slugs=a,b,c`** — Public.
 Comma-separated slugs, **hard-capped at the first 20**; extra values are
 silently dropped ⚠️ **GAP** (silent truncation, no `400`). Missing/empty
 `slugs` → `200 []`. `200` → **bare array** of `ProductListSerializer`, ordered
 by the queryset, **not** by the order of the requested slugs. Unknown slugs are
 omitted silently.
 
-**13. `POST /catalog/products/create/`** — Staff.
+**14. `POST /catalog/products/create/`** — Staff.
 Body `CreateProductInputSerializer`: `name` (≤255), `brand_id` (int ≥ 1),
 `primary_category_id` (int ≥ 1), `description`, `manufacturer_code`, `status`
 (choice), `is_featured`, `category_ids` (list[int]), `tag_ids` (list[int]).
@@ -522,7 +597,7 @@ Body `CreateProductInputSerializer`: `name` (≤255), `brand_id` (int ≥ 1),
 non-staff (⚠️ non-DRF body). `400` on validation; `404` if a referenced brand or
 category does not exist. Slug and UUID are generated server-side. Not idempotent.
 
-**14. `GET /catalog/products/{identifier}/`** — Public. `identifier` is a UUID
+**15. `GET /catalog/products/{identifier}/`** — Public. `identifier` is a UUID
 **or** a slug (§7). `200` → `ProductDetailSerializer`: `id` (**UUID**), `uuid`,
 `name`, `slug`, `description`, `status`, brand/category denormalized fields,
 `main_image`, `categories`, `images[]`, `variants[]`, `tags`, `min_price`,
@@ -534,36 +609,36 @@ category does not exist. Slug and UUID are generated server-side. Not idempotent
 "read" endpoint is **not** side-effect free. ❓ **DECISION REQUIRED**
 (document as intended, or move view tracking to an explicit event endpoint).
 
-**15. `PATCH /catalog/products/{uuid}/update/`** — Staff. Body
+**16. `PATCH /catalog/products/{uuid}/update/`** — Staff. Body
 `UpdateProductInputSerializer` (same fields as create, all optional).
 `200` → `ProductDetailSerializer`. `403` non-staff (custom body), `404` unknown
 UUID, `400` validation. A non-UUID path segment does not match the route → `404`.
 
-**16. `GET /catalog/categories/`** — Public. `200` → **bare array**, recursive
+**17. `GET /catalog/categories/`** — Public. `200` → **bare array**, recursive
 tree: `id`, `name`, `slug`, `url_path`, `depth`, `is_active`, `children[]`.
 Intentionally non-paginated (§6 class C).
 
-**17. `GET /catalog/categories/{slug}/`** — Public. `200` → `id`, `name`, `slug`,
+**18. `GET /catalog/categories/{slug}/`** — Public. `200` → `id`, `name`, `slug`,
 `description`, `image`, `url_path`, `full_name_cached`, `depth`, `is_active`,
 `breadcrumbs[{name, slug, url_path}]`, `products_count`, `meta_title`,
 `meta_description`. `404` unknown/inactive slug.
 
-**18. `GET /catalog/brands/`** — Public. `200` → **bare array** of
+**19. `GET /catalog/brands/`** — Public. `200` → **bare array** of
 `{id, name, slug, logo}` for active brands. Intentionally non-paginated.
 
-**19. `GET /catalog/brands/{slug}/`** — Public. `200` →
+**20. `GET /catalog/brands/{slug}/`** — Public. `200` →
 `{id, name, slug, description, logo, products_count}`. `404` unknown slug.
 
 ### 9.3 Cart (`apps.cart`)
 
 | # | Method | Path | Auth |
 |---|---|---|---|
-| 20 | GET | `/api/v1/cart/` | Public (guest or user) |
-| 21 | DELETE | `/api/v1/cart/` | Public |
-| 22 | POST | `/api/v1/cart/items/` | Public |
-| 23 | PATCH | `/api/v1/cart/items/{item_id}/` | Public |
-| 24 | DELETE | `/api/v1/cart/items/{item_id}/` | Public |
-| 25 | POST | `/api/v1/cart/merge/` | Auth |
+| 21 | GET | `/api/v1/cart/` | Public (guest or user) |
+| 22 | DELETE | `/api/v1/cart/` | Public |
+| 23 | POST | `/api/v1/cart/items/` | Public |
+| 24 | PATCH | `/api/v1/cart/items/{item_id}/` | Public |
+| 25 | DELETE | `/api/v1/cart/items/{item_id}/` | Public |
+| 26 | POST | `/api/v1/cart/merge/` | Auth |
 
 Cart resolution ✅ **CURRENT**: with a JWT the cart is the user's active cart;
 without one it is the cart bound to the Django `session_key` (created on
@@ -574,45 +649,46 @@ demand). Both are created lazily, so the cart endpoints never `404` on "no cart"
 `{id, product_name, sku, price, quantity, total_price}` (money as strings).
 Cart items are embedded and **never paginated**.
 
-**20. `GET /cart/`** → `200` cart (empty cart → `items: []`, `total: "0.00"`).
-**21. `DELETE /cart/`** → **`200` with the emptied cart body** (not `204`)
+**21. `GET /cart/`** → `200` cart (empty cart → `items: []`, `total: "0.00"`).
+**22. `DELETE /cart/`** → **`200` with the emptied cart body** (not `204`)
 ⚠️ **GAP** — inconsistent with other `DELETE`s. Idempotent.
-**22. `POST /cart/items/`** — body `{"variant_id": int ≥ 1, "quantity": int}`.
+**23. `POST /cart/items/`** — body `{"variant_id": int ≥ 1, "quantity": int}`.
 `201` → **the whole cart** (not the created item). Adding an existing variant
 **increments** the quantity, so repeated identical calls are *cumulative*, not
 idempotent. `400` on validation or insufficient stock; `404` unknown variant.
-**23. `PATCH /cart/items/{item_id}/`** — body `{"quantity": int}`. `200` → whole
+**24. `PATCH /cart/items/{item_id}/`** — body `{"quantity": int}`. `200` → whole
 cart. Setting quantity to 0 removes the line (service behaviour). `404` if the
 item does not belong to the caller's cart (ownership enforced in
 `CartService`, §10). `400` on stock violation.
-**24. `DELETE /cart/items/{item_id}/`** → **`200` with the whole cart** (not
+**25. `DELETE /cart/items/{item_id}/`** → **`200` with the whole cart** (not
 `204`) ⚠️ **GAP**. `404` if not owned.
-**25. `POST /cart/merge/`** — Auth, empty body. Merges the guest cart identified
+**26. `POST /cart/merge/`** — Auth, empty body. Merges the guest cart identified
 by the current `session_key` into the user's cart.
 `200` → merged cart; `400 {"detail": "Сессия гостя не найдена."}` when the
 request carries no session; `404 {"detail": "Гостевая корзина не найдена."}`.
 Required because JWT login does not fire `user_logged_in`. Effectively
 idempotent (a second call finds no guest cart → `404`).
 ⚠️ **GAP:** merge depends on a cookie-backed session travelling alongside a
-stateless JWT — a cross-mechanism coupling that API-03 must confirm or replace.
+stateless JWT — a cross-mechanism coupling outside API-03 (separate auth/cookie
+follow-up, see G-10).
 
 ### 9.4 Orders (`apps.orders`)
 
 | # | Method | Path | Auth |
 |---|---|---|---|
-| 26 | GET | `/api/v1/orders/` | Auth |
-| 27 | POST | `/api/v1/orders/` | Auth |
-| 28 | GET | `/api/v1/orders/{order_number}/` | Auth (owner or staff) |
-| 29 | PATCH | `/api/v1/orders/{order_number}/status/` | Staff |
-| 30 | POST | `/api/v1/orders/{order_number}/cancel/` | Auth (owner or staff) |
+| 27 | GET | `/api/v1/orders/` | Auth |
+| 28 | POST | `/api/v1/orders/` | Auth |
+| 29 | GET | `/api/v1/orders/{order_number}/` | Auth (owner or staff) |
+| 30 | PATCH | `/api/v1/orders/{order_number}/status/` | Staff |
+| 31 | POST | `/api/v1/orders/{order_number}/cancel/` | Auth (owner or staff) |
 
-**26. `GET /orders/`** → `200` **bare array** of `OrderListSerializer`
+**27. `GET /orders/`** → `200` **bare array** of `OrderListSerializer`
 (`id`, `order_number`, `status`, `status_display`, `total`, `items_count`,
 `created_at`), scoped to `request.user`. Not paginated ⚠️ **GAP** (§6 class D).
 Staff see only their own orders here — there is no admin order list endpoint.
 ⚠️ **GAP / ❓ DECISION REQUIRED.**
 
-**27. `POST /orders/`** — body `{"notes": str}` (optional).
+**28. `POST /orders/`** — body `{"notes": str}` (optional).
 `201` → `OrderSerializer`: `id`, `order_number`, `status`, `status_display`,
 `is_terminal`, `items[]`, `subtotal`, `delivery_cost`, `discount`, `total`,
 `recipient_name`, `full_address`, `notes`, `cancellation_reason`,
@@ -623,12 +699,12 @@ Failure modes (all from the service): empty cart → `400`; no default address �
 **Not idempotent** — no idempotency key; a retried POST creates a second order.
 ⚠️ **GAP / ❓ DECISION REQUIRED (API-07).**
 
-**28. `GET /orders/{order_number}/`** → `200` `OrderSerializer`.
+**29. `GET /orders/{order_number}/`** → `200` `OrderSerializer`.
 **Ownership:** a non-staff caller requesting someone else's order receives
 `404 {"detail": "Заказ не найден."}`, deliberately identical to the
 "does not exist" response (§10).
 
-**29. `PATCH /orders/{order_number}/status/`** — Staff. Body
+**30. `PATCH /orders/{order_number}/status/`** — Staff. Body
 `{"status": <OrderStatus choice>}`. `200` → full `OrderSerializer`.
 Transitions are validated by the order FSM; an illegal transition → `400`.
 `status=cancelled` is routed through `OrderService.cancel()` (the single
@@ -636,7 +712,7 @@ cancellation path, coordinating coupon release, inventory and payment).
 `404` for an unknown order number (no ownership masking — the caller is staff).
 Idempotent only insofar as the FSM allows the same target state.
 
-**30. `POST /orders/{order_number}/cancel/`** — Auth. Body `{"reason": str}`
+**31. `POST /orders/{order_number}/cancel/`** — Auth. Body `{"reason": str}`
 (optional). `200` → `OrderSerializer`. Allowed for the owner while the order is
 not terminal, and always for staff. Terminal order → `400`. Non-owner → `404`.
 Second cancel of an already-cancelled order → `400`.
@@ -645,53 +721,53 @@ Second cancel of an already-cancelled order → `400`.
 
 | # | Method | Path |
 |---|---|---|
-| 31 | GET | `/api/v1/inventory/` |
-| 32 | GET | `/api/v1/inventory/{variant_id}/` |
-| 33 | POST | `/api/v1/inventory/{variant_id}/restock/` |
-| 34 | POST | `/api/v1/inventory/{variant_id}/adjust/` |
-| 35 | GET | `/api/v1/inventory/{variant_id}/movements/` |
+| 32 | GET | `/api/v1/inventory/` |
+| 33 | GET | `/api/v1/inventory/{variant_id}/` |
+| 34 | POST | `/api/v1/inventory/{variant_id}/restock/` |
+| 35 | POST | `/api/v1/inventory/{variant_id}/adjust/` |
+| 36 | GET | `/api/v1/inventory/{variant_id}/movements/` |
 
 All require `IsAdminUser` (`401` anonymous, `403` authenticated non-staff).
 
-**31.** `200` → **bare array** of `StockSerializer`
+**32.** `200` → **bare array** of `StockSerializer`
 (`id`, `variant_id`, `sku`, `product_name`, `quantity`, `reserved_quantity`,
 `available_quantity`, `is_low_stock`, `is_out_of_stock`,
 `low_stock_threshold`). Not paginated, whole-catalogue scan ⚠️ **GAP**.
-**32.** `200` → one `StockSerializer`; the stock row is **created on demand** if
+**33.** `200` → one `StockSerializer`; the stock row is **created on demand** if
 absent, so a `GET` can write ⚠️ **GAP** (side-effecting read).
 `404 {"detail": "Вариант товара не найден."}` for an unknown variant.
-**33.** Body `{"quantity": int > 0, "note": str}` → `201` `StockMovementSerializer`
+**34.** Body `{"quantity": int > 0, "note": str}` → `201` `StockMovementSerializer`
 (`id`, `kind`, `kind_display`, `delta`, `quantity_before`, `quantity_after`,
 `note`, `order_number`, `performed_by_email`, `created_at`). Cumulative, **not**
 idempotent.
-**34.** Body `{"new_quantity": int ≥ 0, "note": str}` → **`200`** (not `201`,
+**35.** Body `{"new_quantity": int ≥ 0, "note": str}` → **`200`** (not `201`,
 although it also creates a `StockMovement` row) ⚠️ **GAP**. Sets an absolute
 value, therefore effectively idempotent.
-**35.** `200` → **bare array** of movements, newest first. When no `Stock` row
+**36.** `200` → **bare array** of movements, newest first. When no `Stock` row
 exists the endpoint returns `200 []` rather than `404` ⚠️ **GAP** (inconsistent
-with #32, which `404`s only for an unknown variant).
+with #33, which `404`s only for an unknown variant).
 
 ### 9.6 Pricing (`apps.pricing`) — Staff only
 
 | # | Method | Path |
 |---|---|---|
-| 36 | GET | `/api/v1/pricing/variants/{variant_id}/price/` |
-| 37 | POST | `/api/v1/pricing/variants/{variant_id}/price/` |
-| 38 | GET | `/api/v1/pricing/variants/{variant_id}/history/` |
-| 39 | POST | `/api/v1/pricing/prices/bulk/` |
+| 37 | GET | `/api/v1/pricing/variants/{variant_id}/price/` |
+| 38 | POST | `/api/v1/pricing/variants/{variant_id}/price/` |
+| 39 | GET | `/api/v1/pricing/variants/{variant_id}/history/` |
+| 40 | POST | `/api/v1/pricing/prices/bulk/` |
 
-**36.** `200` → `PriceSerializer` (`id`, `variant`, `price`, `sale_price`,
+**37.** `200` → `PriceSerializer` (`id`, `variant`, `price`, `sale_price`,
 `currency`, `effective_price`, `discount_percent`, `created_at`, `updated_at`).
 `404 {"detail": "Вариант не найден."}` or `404 {"detail": "Цена не задана."}`
 — two distinct `404` meanings on one route ⚠️ **GAP**.
-**37.** Body `{"price": decimal, "sale_price": decimal|null, "reason": str}` →
+**38.** Body `{"price": decimal, "sale_price": decimal|null, "reason": str}` →
 **`200`** even when the price row is created ⚠️ **GAP** (upsert returning `200`).
 Writes a `PriceHistory` audit row with `changed_by = request.user`. Idempotent
 for identical payloads in effect, but each call appends history.
-**38.** `200` → **bare array** of `PriceHistorySerializer` (`id`, `old_price`,
+**39.** `200` → **bare array** of `PriceHistorySerializer` (`id`, `old_price`,
 `new_price`, `old_sale_price`, `new_sale_price`, `changed_by` (PK), `reason`,
 `created_at`), newest first. Not paginated ⚠️ **GAP**.
-**39.** Body `{"prices": [{"variant_id", "price", "sale_price?"}, …]}` →
+**40.** Body `{"prices": [{"variant_id", "price", "sale_price?"}, …]}` →
 `200` **bare array** of resulting `PriceSerializer` objects. Atomic
 (`transaction.atomic` in the service): all or nothing. `400` if any entry is
 invalid. ❓ **DECISION REQUIRED:** partial-success semantics are explicitly *not*
@@ -701,17 +777,17 @@ supported; confirm at freeze.
 
 | # | Method | Path | Auth |
 |---|---|---|---|
-| 40 | GET | `/api/v1/payments/` | Auth |
-| 41 | POST | `/api/v1/payments/` | Auth |
-| 42 | POST | `/api/v1/payments/webhook/` | Public + HMAC |
-| 43 | GET | `/api/v1/payments/{payment_number}/` | Auth (owner or staff) |
-| 44 | POST | `/api/v1/payments/{payment_number}/refund/` | Staff |
-| 45 | POST | `/api/v1/payments/{payment_number}/cancel/` | Auth (owner or staff) |
+| 41 | GET | `/api/v1/payments/` | Auth |
+| 42 | POST | `/api/v1/payments/` | Auth |
+| 43 | POST | `/api/v1/payments/webhook/` | Public + HMAC |
+| 44 | GET | `/api/v1/payments/{payment_number}/` | Auth (owner or staff) |
+| 45 | POST | `/api/v1/payments/{payment_number}/refund/` | Staff |
+| 46 | POST | `/api/v1/payments/{payment_number}/cancel/` | Auth (owner or staff) |
 
-**40.** `200` → **bare array** of `PaymentListSerializer` (`id`, `order_number`,
+**41.** `200` → **bare array** of `PaymentListSerializer` (`id`, `order_number`,
 `status`, `status_display`, `amount`, `method`, `method_display`, `provider`,
 `created_at`, `paid_at`), scoped to the caller. Not paginated ⚠️ **GAP**.
-**41.** Body `{"order_id": int, "amount": decimal?, "method": choice
+**42.** Body `{"order_id": int, "amount": decimal?, "method": choice
 (default `card`), "provider": str (default `mock`)}`. When `amount` is omitted
 the order total is used. `201` → `PaymentSerializer` (adds `is_terminal`,
 `is_paid`, `is_refundable`, `refund_amount`, `external_id`, `order`, `user`,
@@ -751,28 +827,28 @@ boundary, unlike every other owned-resource endpoint (§10). A future refactor
 that changed or bypassed the service call would silently remove the protection.
 This is a **defence-in-depth/readability** observation only — there is no
 exploitable path today, so no follow-up issue is attached.
-**42.** See §11.
-**43.** `200` → `PaymentSerializer` with the full event history. Non-owner →
+**43.** See §11.
+**44.** `200` → `PaymentSerializer` with the full event history. Non-owner →
 `404 {"detail": "Платёж не найден."}`.
-**44.** Staff. Body `{"amount": decimal?, "reason": str?}` → `200`
+**45.** Staff. Body `{"amount": decimal?, "reason": str?}` → `200`
 `PaymentSerializer`. Omitting `amount` refunds the full amount. `400` if the
 payment is not refundable or the amount exceeds the refundable balance.
 **Not idempotent** — repeated calls accumulate refunds up to the cap.
-**45.** Body `{"reason": str?}` → `200`. Owner or staff; non-owner → `404`.
+**46.** Body `{"reason": str?}` → `200`. Owner or staff; non-owner → `404`.
 `400` if the payment is terminal.
 
 ### 9.8 Reviews (`apps.reviews`)
 
 | # | Method | Path | Auth |
 |---|---|---|---|
-| 46 | GET | `/api/v1/reviews/` | Public |
-| 47 | POST | `/api/v1/reviews/` | Auth |
-| 48 | GET | `/api/v1/reviews/{review_id}/` | Public |
-| 49 | PATCH | `/api/v1/reviews/{review_id}/` | Auth (author) |
-| 50 | DELETE | `/api/v1/reviews/{review_id}/` | Auth (author or staff) |
-| 51 | POST | `/api/v1/reviews/{review_id}/helpful/` | Auth |
+| 47 | GET | `/api/v1/reviews/` | Public |
+| 48 | POST | `/api/v1/reviews/` | Auth |
+| 49 | GET | `/api/v1/reviews/{review_id}/` | Public |
+| 50 | PATCH | `/api/v1/reviews/{review_id}/` | Auth (author) |
+| 51 | DELETE | `/api/v1/reviews/{review_id}/` | Auth (author or staff) |
+| 52 | POST | `/api/v1/reviews/{review_id}/helpful/` | Auth |
 
-**46. `GET /reviews/`** — Public, **paginated with a bespoke envelope** (§6 B).
+**47. `GET /reviews/`** — Public, **paginated with a bespoke envelope** (§6 B).
 Query parameters (parsed by hand, not by a serializer ⚠️ **GAP**):
 
 | Param | Behaviour |
@@ -793,18 +869,18 @@ Only approved reviews are listed. Response items are `ReviewListSerializer`
 `created_at`); `my_vote` is populated only for authenticated callers.
 `ordering=helpful` sorts in Python over the entire matched set.
 
-**47. `POST /reviews/`** — Auth. Body `product_id` **or** `product_uuid`,
+**48. `POST /reviews/`** — Auth. Body `product_id` **or** `product_uuid`,
 `rating` (1–5), `text`, `title?`. `201` → `ReviewSerializer`. Unknown product →
 `404`; neither identifier supplied → **`404`** `{"detail": "Укажите product_id
 или product_uuid."}` — a validation error returned as `404` ⚠️ **GAP**.
 Duplicate review by the same user for the same product → `400` from the service.
 
-**48–50. `/reviews/{review_id}/`.** `GET` is public but an unapproved review is
+**49–51. `/reviews/{review_id}/`.** `GET` is public but an unapproved review is
 visible only to its author or staff, otherwise `404` (§10). `PATCH` (author
 only; body `rating?`, `title?`, `text?`) → `200`. `DELETE` (author or staff) →
 `204`. Non-author `PATCH` → `403` from the service.
 
-**51. `POST /reviews/{review_id}/helpful/`** — Auth. Body `{"vote": "yes"|"no"}`.
+**52. `POST /reviews/{review_id}/helpful/`** — Auth. Body `{"vote": "yes"|"no"}`.
 `200` → `ReviewSerializer` plus `my_vote`. **Toggle semantics:** repeating the
 same vote clears it; the opposite vote switches it. Therefore **not idempotent**
 — identical repeated calls alternate between voted and cleared.
@@ -815,24 +891,24 @@ same vote clears it; the opposite vote switches it. Therefore **not idempotent**
 
 | # | Method | Path | Auth |
 |---|---|---|---|
-| 52 | GET | `/api/v1/discounts/coupons/` | Staff |
-| 53 | POST | `/api/v1/discounts/apply/` | Auth |
-| 54 | POST | `/api/v1/discounts/remove/` | Auth |
-| 55 | POST | `/api/v1/discounts/preview/` | Auth |
+| 53 | GET | `/api/v1/discounts/coupons/` | Staff |
+| 54 | POST | `/api/v1/discounts/apply/` | Auth |
+| 55 | POST | `/api/v1/discounts/remove/` | Auth |
+| 56 | POST | `/api/v1/discounts/preview/` | Auth |
 
-**52.** `200` → **bare array** of `CouponListSerializer` (`id`, `code`,
+**53.** `200` → **bare array** of `CouponListSerializer` (`id`, `code`,
 `discount_type`, `discount_value`, `max_discount`, `min_order_amount`,
 `is_valid_now`, `is_exhausted`, `started_at`, `ended_at`) for currently valid
 coupons. Not paginated ⚠️ **GAP**.
-**53.** Body `{"code": str, "order_id": int}`. The order is fetched with
+**54.** Body `{"code": str, "order_id": int}`. The order is fetched with
 `user=request.user`, so another user's order → `404 {"detail": "Заказ не
 найден."}`. `200` → `{"order_id": int, "discount": "…", "total": "…"}` —
 a **bespoke mini-payload**, not the order representation ⚠️ **GAP**.
 `400` for an invalid/expired/exhausted coupon or an unmet minimum.
-**54.** Body `{"order_id": int}` validated by hand →
+**55.** Body `{"order_id": int}` validated by hand →
 `400 {"order_id": "Обязательное поле."}` when missing ⚠️ **GAP**.
 `200` → same mini-payload. Idempotent.
-**55.** Body `{"code": str, "order_amount": decimal}` → `200`
+**56.** Body `{"code": str, "order_amount": decimal}` → `200`
 `{code, discount_type, discount_value, max_discount, calculated_discount,
 amount_after_discount}`. Pure computation, no side effects, idempotent.
 `400`/`404` for an unknown or invalid coupon.
@@ -841,43 +917,43 @@ amount_after_discount}`. Pure computation, no side effects, idempotent.
 
 | # | Method | Path | Auth |
 |---|---|---|---|
-| 56 | GET | `/api/v1/shipping/methods/` | Auth |
-| 57 | POST | `/api/v1/shipping/calculate/` | Auth |
-| 58 | GET | `/api/v1/shipping/shipments/` | Auth |
-| 59 | POST | `/api/v1/shipping/shipments/create/` | Staff |
-| 60 | GET | `/api/v1/shipping/shipments/{pk}/` | Auth (owner or staff) |
-| 61 | PATCH | `/api/v1/shipping/shipments/{pk}/status/` | Staff |
-| 62 | POST | `/api/v1/shipping/shipments/{pk}/tracking/` | Staff |
-| 63 | GET | `/api/v1/shipping/track/{tracking}/` | **Public** |
+| 57 | GET | `/api/v1/shipping/methods/` | Auth |
+| 58 | POST | `/api/v1/shipping/calculate/` | Auth |
+| 59 | GET | `/api/v1/shipping/shipments/` | Auth |
+| 60 | POST | `/api/v1/shipping/shipments/create/` | Staff |
+| 61 | GET | `/api/v1/shipping/shipments/{pk}/` | Auth (owner or staff) |
+| 62 | PATCH | `/api/v1/shipping/shipments/{pk}/status/` | Staff |
+| 63 | POST | `/api/v1/shipping/shipments/{pk}/tracking/` | Staff |
+| 64 | GET | `/api/v1/shipping/track/{tracking}/` | **Public** |
 
-**56.** Query `zone_code?`, `region?`, `shipping_type?` — free-form strings,
+**57.** Query `zone_code?`, `region?`, `shipping_type?` — free-form strings,
 unvalidated ⚠️ **GAP**. `200` → **bare array** of `ShippingMethodListSerializer`
 (`id`, `name`, `shipping_type`, `zone_name`, `base_price`, `price_per_kg`,
 `free_shipping_threshold`, `estimated_days_display`, `is_active`).
 ⚠️ **GAP / ❓ DECISION REQUIRED:** this is reference data yet requires
 authentication, which prevents a guest checkout from showing delivery options.
-**57.** Body `order_total` (required), `zone_code?`, `region?`,
+**58.** Body `order_total` (required), `zone_code?`, `region?`,
 `shipping_type?`, `weight_kg?` → `200`
 `{"zone": ShippingZone|null, "methods": [{method_id, method_name,
 shipping_type, cost, estimated_days_display, is_free}]}`. Pure computation.
 Note `cost` is emitted by a hand-built dict, so its JSON type follows the
 underlying `Decimal` serialization of `ShippingCostResponseSerializer`'s
 declared fields ⚠️ **GAP (schema-level)**.
-**58.** `200` → **bare array** of `ShipmentListSerializer`. Staff see **all**
+**59.** `200` → **bare array** of `ShipmentListSerializer`. Staff see **all**
 shipments; other users see only their own. Not paginated ⚠️ **GAP**.
-**59.** Staff. Note the path is `/shipments/create/`, not `POST /shipments/`
+**60.** Staff. Note the path is `/shipments/create/`, not `POST /shipments/`
 ⚠️ **GAP** (non-RESTful, inconsistent with orders/payments). Body `order_id`,
 `method_id`, `weight_kg?`, `notes?` → `201` `ShipmentDetailSerializer`.
 `404` for an unknown order or method.
-**60.** `200` → `ShipmentDetailSerializer`. A non-staff caller asking for
+**61.** `200` → `ShipmentDetailSerializer`. A non-staff caller asking for
 someone else's shipment gets `404 {"detail": "Отправление не найдено."}` (§10).
-**61.** Staff. Body `{"status": str, "tracking_number": str?}` → `200`.
+**62.** Staff. Body `{"status": str, "tracking_number": str?}` → `200`.
 `status` is a plain `CharField` here (not a `ChoiceField`), so the valid set is
 enforced only by the service FSM ⚠️ **GAP**. Illegal transition → `400`.
-**62.** Staff. Body `{"tracking_number": str}` → `200` full shipment.
+**63.** Staff. Body `{"tracking_number": str}` → `200` full shipment.
 Idempotent (absolute set). Note this is a `POST` that sets a single field,
-whereas #61 uses `PATCH` ⚠️ **GAP (method semantics)**.
-**63.** **Public** (`permission_classes = ()` — no authentication at all).
+whereas #62 uses `PATCH` ⚠️ **GAP (method semantics)**.
+**64.** **Public** (`permission_classes = ()` — no authentication at all).
 `tracking` matches either the carrier `tracking_number` **or** the internal
 `SHP-XXXXXXXX` code. `200` → `ShipmentTrackingSerializer` (`internal_tracking`,
 `tracking_number`, `status`, `status_display`, `method_name`,
@@ -891,26 +967,26 @@ per-user throttling (anonymous rate only). ❓ **DECISION REQUIRED.**
 
 | # | Method | Path |
 |---|---|---|
-| 64 | GET | `/api/v1/wishlist/` |
-| 65 | POST | `/api/v1/wishlist/add/` |
-| 66 | DELETE | `/api/v1/wishlist/remove/{item_id}/` |
-| 67 | POST | `/api/v1/wishlist/move-to-cart/` |
-| 68 | POST | `/api/v1/wishlist/clear/` |
+| 65 | GET | `/api/v1/wishlist/` |
+| 66 | POST | `/api/v1/wishlist/add/` |
+| 67 | DELETE | `/api/v1/wishlist/remove/{item_id}/` |
+| 68 | POST | `/api/v1/wishlist/move-to-cart/` |
+| 69 | POST | `/api/v1/wishlist/clear/` |
 
-**64.** `200` → `WishlistSerializer` `{id, items_count, items[], created_at,
+**65.** `200` → `WishlistSerializer` `{id, items_count, items[], created_at,
 updated_at}`; created on demand, so it never `404`s. `WishlistItemSerializer`:
 `id`, `variant_id`, `product_name`, `variant_name`, `sku`, `effective_price`,
 `is_available`, `image_url`, `note`, `sort_order`, `created_at`. Items embedded,
 never paginated.
-**65.** Body `{"variant_id": int, "note": str?}` → `201` `WishlistItemSerializer`.
+**66.** Body `{"variant_id": int, "note": str?}` → `201` `WishlistItemSerializer`.
 Unknown variant → `404`. Adding an existing variant returns the existing item
 (idempotent in effect) but still with `201` ⚠️ **GAP**.
-**66.** `204`, no body. Ownership enforced in the service; removing a
+**67.** `204`, no body. Ownership enforced in the service; removing a
 non-existent/foreign item does not leak existence.
-**67.** Body `{"item_ids": [int]?, "variant_id": int?, "quantity": int=1}` →
+**68.** Body `{"item_ids": [int]?, "variant_id": int?, "quantity": int=1}` →
 `200 {"moved": int}`. Bespoke counter payload; the resulting cart is **not**
 returned ⚠️ **GAP**. Requires an authenticated cart.
-**68.** `200 {"removed": int}`. Idempotent (second call returns `0`).
+**69.** `200 {"removed": int}`. Idempotent (second call returns `0`).
 Note this is a `POST`, whereas the cart's clear operation is a `DELETE`
 ⚠️ **GAP (method semantics)**.
 
@@ -918,23 +994,23 @@ Note this is a `POST`, whereas the cart's clear operation is a `DELETE`
 
 | # | Method | Path |
 |---|---|---|
-| 69 | GET | `/api/v1/notifications/` |
-| 70 | GET | `/api/v1/notifications/unread/` |
-| 71 | GET | `/api/v1/notifications/unread-count/` |
-| 72 | POST | `/api/v1/notifications/read-all/` |
-| 73 | POST | `/api/v1/notifications/{pk}/read/` |
+| 70 | GET | `/api/v1/notifications/` |
+| 71 | GET | `/api/v1/notifications/unread/` |
+| 72 | GET | `/api/v1/notifications/unread-count/` |
+| 73 | POST | `/api/v1/notifications/read-all/` |
+| 74 | POST | `/api/v1/notifications/{pk}/read/` |
 
-**69.** `200` → **bare array** of `NotificationListSerializer` (`id`,
+**70.** `200` → **bare array** of `NotificationListSerializer` (`id`,
 `notification_type`, `title`, `status`, `is_read`, `created_at`). Not paginated
 ⚠️ **GAP** — an unbounded, monotonically growing per-user collection.
-**70.** `200` → **bare array** of the *full* `NotificationSerializer`
+**71.** `200` → **bare array** of the *full* `NotificationSerializer`
 (`id`, `notification_type`, `channel`, `title`, `body`, `status`,
 `related_object_type`, `related_object_id`, `action_url`, `is_read`, `sent_at`,
 `read_at`, `created_at`). ⚠️ **GAP** — two list endpoints on the same resource
 return **different representations**.
-**71.** `200 {"unread_count": int}`.
-**72.** `200 {"marked": int}`. Idempotent (second call returns `0`).
-**73.** `200` → the full notification. Ownership is enforced in
+**72.** `200 {"unread_count": int}`.
+**73.** `200 {"marked": int}`. Idempotent (second call returns `0`).
+**74.** `200` → the full notification. Ownership is enforced in
 `NotificationService.mark_read(pk, user)`; a foreign id raises `NotFound` →
 `404`. Idempotent.
 
@@ -942,14 +1018,14 @@ return **different representations**.
 
 | # | Method | Path | Extra query params |
 |---|---|---|---|
-| 74 | GET | `/api/v1/analytics/dashboard/` | `days` |
-| 75 | GET | `/api/v1/analytics/sales/` | `days` |
-| 76 | GET | `/api/v1/analytics/sales/timeline/` | `days`, `period` |
-| 77 | GET | `/api/v1/analytics/top-products/` | `days`, `metric`, `limit` |
-| 78 | GET | `/api/v1/analytics/top-categories/` | `days`, `limit` |
-| 79 | GET | `/api/v1/analytics/top-customers/` | `days`, `limit` |
-| 80 | GET | `/api/v1/analytics/conversion/` | `days` |
-| 81 | GET | `/api/v1/analytics/most-viewed/` | `days`, `limit` |
+| 75 | GET | `/api/v1/analytics/dashboard/` | `days` |
+| 76 | GET | `/api/v1/analytics/sales/` | `days` |
+| 77 | GET | `/api/v1/analytics/sales/timeline/` | `days`, `period` |
+| 78 | GET | `/api/v1/analytics/top-products/` | `days`, `metric`, `limit` |
+| 79 | GET | `/api/v1/analytics/top-categories/` | `days`, `limit` |
+| 80 | GET | `/api/v1/analytics/top-customers/` | `days`, `limit` |
+| 81 | GET | `/api/v1/analytics/conversion/` | `days` |
+| 82 | GET | `/api/v1/analytics/most-viewed/` | `days`, `limit` |
 
 * `days` is validated by `AnalyticsDateRangeSerializer` (integer, bounded,
   default 30); an invalid value → `400`.
@@ -968,7 +1044,7 @@ return **different representations**.
 
 ### 9.14 Health (`apps.core`)
 
-**82. `GET /api/v1/health/`** — **Public**, and served by a plain Django `View`
+**83. `GET /api/v1/health/`** — **Public**, and served by a plain Django `View`
 (`JsonResponse`), *not* by DRF: no JWT parsing, no throttling, no DRF renderer,
 no OpenAPI schema entry ⚠️ **GAP**.
 `200 {"status": "ok", "version": "1.0.0", "database": "ok"}` when
@@ -984,7 +1060,7 @@ documentation surface, and each overrides the global JSON-only renderer
 configuration with its own renderer set (§2). They are therefore explicitly
 exempt from the JSON-only and `406` rules that govern §9.1–§9.14.
 
-**83. `GET /api/v1/schema/`** — Public. `SpectacularAPIView`. Returns the
+**84. `GET /api/v1/schema/`** — Public. `SpectacularAPIView`. Returns the
 OpenAPI 3 document. Renderers (overriding the global default):
 `OpenApiYamlRenderer` → `application/vnd.oai.openapi` (**default**, YAML),
 `OpenApiYamlRenderer2` → `application/yaml`,
@@ -995,7 +1071,7 @@ Format selection: content negotiation on `Accept`, or the `?format=json` /
 endpoint does not document itself. An `Accept` matching none of the four schema
 media types → `406`.
 
-**84. `GET /api/v1/docs/`** — Public. `SpectacularSwaggerView` — Swagger UI
+**85. `GET /api/v1/docs/`** — Public. `SpectacularSwaggerView` — Swagger UI
 bound to `url_name="schema"`. Renderer: `TemplateHTMLRenderer` →
 **`text/html`** (overriding the global JSON-only default). This endpoint returns
 an HTML page by design and never JSON.
@@ -1003,8 +1079,10 @@ an HTML page by design and never JSON.
 Both are unauthenticated in every environment, including production
 ⚠️ **GAP / ❓ DECISION REQUIRED (API-02).**
 
-**Endpoint total: 84 routes** across 15 groups (counting each HTTP method on a
-shared path separately where the semantics differ, as enumerated above).
+**Endpoint total: 85 contract entries** across 15 groups, backed by **77 URL
+patterns** in `get_resolver()`. A shared path whose HTTP methods have materially
+different semantics is enumerated as separate entries above; a shared path with
+uniform semantics is a single entry (e.g. `GET/PATCH/DELETE /users/me/`).
 
 ---
 
@@ -1044,7 +1122,7 @@ payments and shipments (they see everything).
 **service** rather than in the view: it fetches the order by raw PK, then
 `PaymentService.create_payment()` raises `NotFound` when
 `order.user_id != user.pk`. The observable contract is the same `404` as
-everywhere else (§9.7 #41). No IDOR exists here; the difference is structural
+everywhere else (§9.7 #42). No IDOR exists here; the difference is structural
 only, and no follow-up issue is attached.
 
 ⚠️ **GAP:** `GET /api/v1/reviews/?user_id=<other>` silently rewrites the filter
@@ -1176,7 +1254,7 @@ the API-02…API-07 scope statements.
 > service performs the ownership check (`order.user_id != user.pk` → `NotFound`)
 > and that both API- and service-level tests assert it. **The gap and its
 > follow-up issue reference were removed**; the factual behaviour is documented
-> in §9.7 #41 and §10. Issue #68 was filed before this re-verification and is
+> in §9.7 #42 and §10. Issue #68 was filed before this re-verification and is
 > now obsolete — it should be closed as "not a defect" by the Owner. Follow-up
 > numbering (F-1…F-12) is unchanged so that existing issue links stay valid.
 
@@ -1191,7 +1269,7 @@ the API-02…API-07 scope statements.
 | G-7 | Custom `403` body for catalog staff checks instead of the DRF default | §3.2 | **API-04** |
 | G-8 | `DELETE` semantics inconsistent: `204` (address/review/wishlist) vs `200`+body (cart, cart item) vs `200`+`detail` soft delete (`/users/me/`) | §9.1, §9.3 | **API-04** |
 | G-9 | Creating actions return mixed `200`/`201` | §11.1 | **API-04** |
-| G-10 | No logout endpoint; password change does not invalidate tokens; guest-cart merge couples JWT to a cookie session | §3.1, §9.3 | **API-03** |
+| G-10 | Guest-cart merge (`/cart/merge/`) couples JWT to a cookie session; password change/reset intentionally keeps existing JWTs/refresh tokens valid (API-03 freeze) | §3.4, §9.3 | Separate auth/cookie follow-up outside API-03 |
 | G-11 | Unauthenticated `/api/v1/schema/` and `/api/v1/docs/` in production | §9.15 | **API-02** |
 | G-12 | Optional `drf_spectacular` imports make schema generation best-effort; no committed artifact, no CI validation | §12 | **API-02** |
 | G-13 | `int()` on `page`/`page_size` (reviews) and `limit` (analytics) without try/except → `500` on non-numeric input | §9.8, §9.13 | **[F-1 (#66)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)** |
@@ -1238,7 +1316,7 @@ API v1 **cannot be frozen** until the following are closed:
 | Ticket | Must resolve |
 |---|---|
 | **API-02 — OpenAPI contract** | Remove the optional `drf_spectacular` import fallbacks so schema generation is mandatory; annotate every response (no string-literal responses); document query parameters; include health; commit and CI-validate a schema artifact; decide on protecting `/schema/` and `/docs/`; invert the precedence rule in §12. Closes G-11, G-12, G-25. |
-| **API-03 — Authentication contract** | Logout / refresh-token revocation; token invalidation on password change; the JWT↔session coupling in `/cart/merge/`. Closes G-10. |
+| **API-03 — Authentication contract** | Logout / refresh-token revocation; explicit access-token no-blacklist policy; deterministic password change/reset lifecycle; account deactivation behaviour. Closes the logout portion of G-10; the `/cart/merge/` cookie coupling remains a separate follow-up. |
 | **API-04 — Error contract** | One error envelope with stable machine-readable codes; `400` body type consistency; `409` decision; `DELETE`/creation status-code normalization; replace bespoke mini-payloads. Closes G-4…G-9, G-26, G-29, G-31. |
 | **API-05 — Collection/pagination contract** | One pagination envelope; `page_size` as a first-class parameter; paginate the 11 unbounded collections; unify notification representations; validate list query parameters. Closes G-1, G-2, G-3, G-14, G-15, G-24. |
 | **API-06 — API integration/contract tests** | Executable tests asserting every claim in §9 (status codes, shapes, ownership `404`s, pagination envelopes, webhook signature handling), so the contract cannot silently drift. |
@@ -1252,20 +1330,24 @@ client-visible change requires `/api/v2/` or an explicit, versioned deprecation.
 
 ---
 
-## 15. Verification performed by API-01
+## 15. Verification performed by API-01 and API-03
 
 * Endpoint inventory was produced by walking the live Django URL resolver
-  (`get_resolver()`), not by reading docstrings — **84 `/api/v1/` routes**, all
-  represented in §9. No public `/api/v1/` endpoint was found that is absent from
-  this document.
+  (`get_resolver()`), not by reading docstrings — **77 `/api/v1/` URL patterns**,
+  enumerated as **85 contract entries** in §9. API-03 adds
+  `POST /api/v1/auth/logout/` (#4 in §9.1). No public `/api/v1/` endpoint was
+  found that is absent from this document.
 * Permission classes, HTTP methods and serializer field sets were introspected
   from the loaded application (`permission_classes`, `Serializer().fields`).
 * `python manage.py check --fail-level WARNING` → *System check identified no
   issues (0 silenced).*
 * `python manage.py makemigrations --check --dry-run` → *No changes detected.*
 * `git diff --check` → clean.
-* This change is documentation-only: no Python file, route, serializer,
-  permission or migration was modified.
+* API-03's code change is scoped to the authentication lifecycle:
+  `POST /api/v1/auth/logout/` blacklists the presented refresh token, and
+  `SIMPLE_JWT` freezes `CHECK_USER_IS_ACTIVE=True` /
+  `CHECK_REVOKE_TOKEN=False`. No authorization model, error schema, pagination,
+  OpenAPI annotation or token-family design was modified.
 
 **Review corrections (PR #78):**
 

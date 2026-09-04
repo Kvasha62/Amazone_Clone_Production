@@ -5,7 +5,7 @@
 #   path('api/v1/', include('apps.users.urls'))
 #
 # ДВЕ ГРУППЫ ЭНДПОИНТОВ:
-#   /api/v1/auth/*    — аутентификация (JWT + регистрация + смена пароля)
+#   /api/v1/auth/*    — аутентификация (JWT + регистрация + смена пароля + выход)
 #   /api/v1/users/*   — профиль и адреса (требуют JWT)
 #
 # SimpleJWT предоставляет TokenObtainPairView (login) и
@@ -23,7 +23,7 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 
-from apps.users.api_views.auth_views import RegisterView, ChangePasswordView
+from apps.users.api_views.auth_views import RegisterView, ChangePasswordView, LogoutView
 from apps.users.api_views.user_views import MeView
 from apps.users.api_views.address_views import (
     AddressListView,
@@ -49,6 +49,7 @@ urlpatterns = [
     path('auth/login/', EmailTokenObtainPairView.as_view(), name='login'),
     # SimpleJWT refresh: POST {refresh} → {access}
     path('auth/refresh/', TokenRefreshView.as_view(), name='refresh'),
+    path('auth/logout/', LogoutView.as_view(), name='logout'),
     path('auth/change-password/', ChangePasswordView.as_view(), name='change-password'),
 
     # ==========================================================
