@@ -77,5 +77,16 @@ jobs:
       - name: Apply migrations
         run: python manage.py migrate --noinput
 
+      - name: Generate and validate OpenAPI schema
+        run: python manage.py spectacular --file schema.yml --validate
+
+      - name: Upload OpenAPI schema artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-schema
+          path: schema.yml
+          if-no-files-found: warn
+
       - name: Run tests
         run: python manage.py test --verbosity 2
