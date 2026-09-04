@@ -186,7 +186,9 @@ class AccessTokenContractTests(AuthContractTestCase):
 
     def test_expired_access_token_is_auth_failure(self):
         access = AccessToken.for_user(self.user)
-        access.set_exp(from_time=timezone.now() - timedelta(minutes=1))
+        # 16 minutes before now + the default 15-minute lifetime => 1 minute
+        # in the past.
+        access.set_exp(from_time=timezone.now() - timedelta(minutes=16))
         self._authorize(str(access))
         resp = self.client.get(self.me_url)
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -222,8 +224,11 @@ class RefreshRotationContractTests(AuthContractTestCase):
 
     def test_expired_refresh_cannot_be_used(self):
         refresh = RefreshToken.for_user(self.user)
-        refresh.set_exp(from_time=timezone.now() - timedelta(days=8))
-        refresh.set_iat(from_time=timezone.now() - timedelta(days=8))
+        # 8 days before now + the default 7-day refresh lifetime => 1 day in
+        # the past.
+        past = timezone.now() - timedelta(days=8)
+        refresh.set_exp(from_time=past)
+        refresh.set_iat(at_time=past)
 
         resp = self.client.post(self.refresh_url, {'refresh': str(refresh)}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
