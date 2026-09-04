@@ -1,0 +1,1187 @@
+# API v1 Contract (API-01)
+
+**Status:** Normative, pre-freeze draft of the *current* API v1 contract.
+**Scope:** Every public `/api/v1/` endpoint served by this repository.
+**Issue:** API-01 — Formalize API v1 contract.
+**Evidence base:** `config/urls.py`, `apps/*/urls.py`, `apps/*/api_views/**`,
+`apps/*/serializers/**`, `apps/*/services/**`, `config/settings.py`
+(commit base: `main` @ `45fa9b7`).
+
+> **Reading rules.** Every statement in this document describes behaviour that
+> exists in the code today, unless it is explicitly marked as one of:
+>
+> | Marker | Meaning |
+> |---|---|
+> | ✅ **CURRENT** | Verified behaviour of the current implementation. |
+> | ⚠️ **GAP** | Known inconsistency / not standardized. Must be resolved by a follow-up API Freeze ticket. |
+> | ❓ **DECISION REQUIRED** | Contract decision still owed before API v1 freeze. |
+> | 🔁 **FOLLOW-UP** | Deliberately deferred to API-02…API-07. |
+>
+> API-01 is documentation-only: **no endpoint behaviour was changed.**
+
+---
+
+## 1. Purpose and status of API v1
+
+API v1 is the application-level HTTP contract between the Django/DRF backend of
+`Amazone_Clone_Production` and its clients (primarily the React frontend and the
+payment provider webhook caller).
+
+This document is the authoritative, human-readable contract. It exists because
+the OpenAPI schema is *not yet* a guaranteed contract boundary (see §12), and
+because several cross-context conventions (pagination, error shape, logout) are
+still inconsistent (see §13).
+
+API v1 is **not frozen**. The freeze gate is described in §14.
+
+---
+
+## 2. Base path and versioning
+
+✅ **CURRENT**
+
+* All public endpoints are served under the literal prefix `/api/v1/`.
+* Versioning is **path-based and static**. DRF's versioning framework is *not*
+  configured (`REST_FRAMEWORK` has no `DEFAULT_VERSIONING_CLASS`); the version is
+  purely a URL prefix declared in `config/urls.py`.
+* There is no content negotiation on version, no `Accept-Version` header, and no
+  deprecation header mechanism.
+* Renderer: JSON only (`DEFAULT_RENDERER_CLASSES = (JSONRenderer,)`). The
+  browsable API is disabled; unsupported `Accept` values yield `406`.
+* Parsers: DRF defaults (JSON, form, multipart).
+* Non-`/api/v1/` routes that also exist on the deployment: `/admin/` (Django
+  admin, not part of this contract) and, in `DEBUG` only, `/media/<path>`.
+
+Prefix map (`config/urls.py`):
+
+| Prefix | Bounded context |
+|---|---|
+| `/api/v1/auth/…`, `/api/v1/users/…` | users |
+| `/api/v1/catalog/…` | catalog |
+| `/api/v1/cart/…` | cart |
+| `/api/v1/orders/…` | orders |
+| `/api/v1/inventory/…` | inventory |
+| `/api/v1/pricing/…` | pricing |
+| `/api/v1/payments/…` | payments |
+| `/api/v1/reviews/…` | reviews |
+| `/api/v1/discounts/…` | discounts |
+| `/api/v1/shipping/…` | shipping |
+| `/api/v1/wishlist/…` | wishlist |
+| `/api/v1/notifications/…` | notifications |
+| `/api/v1/analytics/…` | analytics |
+| `/api/v1/health/` | core |
+| `/api/v1/schema/`, `/api/v1/docs/` | drf-spectacular |
+
+⚠️ **GAP — prefix asymmetry.** `apps.users.urls` and `apps.pricing.urls` are
+mounted at bare `/api/v1/` and carry their own segment internally
+(`auth/…`, `users/…`, `pricing/…`), while every other context is mounted at its
+own prefix. This is invisible to clients but makes the routing tree harder to
+verify mechanically. Cosmetic only — no client-visible change proposed here.
+
+---
+
+## 3. Global authentication / authorization conventions
+
+### 3.1 Authentication mechanism ✅ **CURRENT**
+
+* Scheme: **JWT bearer** via `rest_framework_simplejwt.authentication.JWTAuthentication`
+  (the only entry in `DEFAULT_AUTHENTICATION_CLASSES`).
+* Header: `Authorization: Bearer <access token>`.
+* Login is by **email**, not username: `POST /api/v1/auth/login/` with
+  `{"email", "password"}` (custom `EmailTokenObtainPairView`).
+* Token lifetimes (`SIMPLE_JWT`): access **15 minutes**, refresh **7 days**.
+* `ROTATE_REFRESH_TOKENS = True` and `BLACKLIST_AFTER_ROTATION = True`: each
+  successful refresh returns a *new* refresh token and blacklists the old one.
+* Sessions: Django sessions still exist and are used **only** for the guest cart
+  (`session_key`) and for `/admin/`. API authentication itself is stateless.
+
+⚠️ **GAP — no logout endpoint.** There is no `/api/v1/auth/logout/`. Refresh
+tokens can only be invalidated by rotation or expiry; a client "logout" is
+purely a client-side token discard. 🔁 **FOLLOW-UP: API-03.**
+
+❓ **DECISION REQUIRED.** Whether logout must blacklist the presented refresh
+token (`rest_framework_simplejwt.token_blacklist` is installed and its admin
+models are registered) or whether client-side discard is the frozen contract.
+
+### 3.2 Permission tiers ✅ **CURRENT**
+
+| Tier | DRF class | Meaning |
+|---|---|---|
+| Public | `AllowAny` (or empty `permission_classes`) | No token required. |
+| Authenticated | `IsAuthenticated` | Any valid, active user. |
+| Staff/admin | `IsAdminUser` | `user.is_staff` is true. |
+| Inline staff check | `IsAuthenticated` + `if not request.user.is_staff: 403` | Used by catalog product create/update. |
+
+⚠️ **GAP — two ways of expressing "staff only".** Most staff endpoints use
+`IsAdminUser` (→ `403` for a logged-in non-staff user, `401` for anonymous).
+`ProductCreateView` / `ProductUpdateView` use `IsAuthenticated` plus a manual
+`is_staff` check returning `{"detail": "Недостаточно прав."}` with `403`. The
+status codes coincide, but the error body differs from the DRF default.
+🔁 **FOLLOW-UP: API-04.**
+
+⚠️ **GAP — object-level permissions are enforced in views/services, not via
+DRF `has_object_permission`.** There is no shared `IsOwner` permission class;
+each context re-implements ownership. See §10.
+
+### 3.3 Throttling ✅ **CURRENT**
+
+* Global defaults: `AnonRateThrottle` `60/min` (env `THROTTLE_ANON`),
+  `UserRateThrottle` `120/min` (env `THROTTLE_USER`).
+* Per-view overrides: cart `30/min` anon / `120/min` user; orders `30/min` user;
+  users profile & addresses `60/min` user.
+* Throttling is disabled in the test configuration (rates set to `None`).
+* Exceeding a rate yields `429 Too Many Requests` with DRF's
+  `{"detail": "…"}` body and a `Retry-After` header.
+
+---
+
+## 4. Global request/response conventions
+
+✅ **CURRENT**
+
+* Content type: `application/json` in and out (multipart accepted by DRF's
+  default parsers but no documented endpoint requires it; images are set through
+  the admin).
+* Trailing slash is **mandatory** on every route (Django `APPEND_SLASH` will
+  redirect `GET` without a slash, but non-idempotent methods will fail).
+* Field naming: `snake_case` throughout.
+* Input validation uses explicit `*InputSerializer` / `*QuerySerializer`
+  classes with `is_valid(raise_exception=True)`; models are never bound
+  directly to request bodies.
+* Output uses explicit `*Serializer` / `*ListSerializer` classes;
+  `read_only_fields = fields` is the norm on output model serializers.
+* Language: user-facing `detail` messages are **Russian free text**. They are
+  not stable identifiers.
+
+⚠️ **GAP — no machine-readable error codes.** Clients must branch on HTTP status
+plus field names, never on message text. 🔁 **FOLLOW-UP: API-04.**
+
+---
+
+## 5. Global error conventions and known gaps
+
+### 5.1 What the framework produces ✅ **CURRENT**
+
+No custom `EXCEPTION_HANDLER` is configured, so DRF's default handler applies:
+
+| Situation | Status | Body |
+|---|---|---|
+| Serializer validation failure | `400` | `{"<field>": ["msg", …], …}` and/or `{"non_field_errors": [...]}` |
+| `rest_framework.exceptions.ValidationError` raised in a service | `400` | dict or list, depending on how it was raised |
+| Missing/invalid/expired token on a protected endpoint | `401` | `{"detail": "…", "code": "…", "messages": [...]}` (SimpleJWT) |
+| Authenticated but not permitted | `403` | `{"detail": "You do not have permission to perform this action."}` |
+| `NotFound` raised (or unmatched route) | `404` | `{"detail": "…"}` |
+| Throttled | `429` | `{"detail": "Request was throttled. Expected available in N seconds."}` |
+| Unhandled exception | `500` | Django/DRF default; no JSON error contract guaranteed |
+
+### 5.2 What views produce by hand ⚠️ **GAP**
+
+Several views bypass DRF exceptions and return ad-hoc payloads:
+
+* `POST /api/v1/auth/register/` → `400` `{"email": "…"}` / `{"username": "…"}`
+  where the value is a **string**, not a list (DRF validation errors are lists).
+* `POST /api/v1/auth/change-password/` → `400` `{"old_password": "…"}` (string).
+* `POST /api/v1/auth/password-reset/confirm/` → `400` `{"detail": "…"}`.
+* `POST /api/v1/cart/merge/` → `400`/`404` `{"detail": "…"}`.
+* `POST /api/v1/catalog/products/create/`, `PATCH …/update/` → `403`
+  `{"detail": "Недостаточно прав."}`.
+* `GET/POST /api/v1/pricing/variants/{variant_id}/price/` → `404`
+  `{"detail": "Вариант не найден."}` / `{"detail": "Цена не задана."}`
+  returned directly rather than raised.
+* `POST /api/v1/discounts/remove/` → `400` `{"order_id": "Обязательное поле."}`
+  (hand-rolled required-field check, no serializer).
+* `POST /api/v1/payments/webhook/` → `403` / `200` / `502` custom `detail`
+  payloads (see §11).
+
+**Consequence:** the *type* of a `400` field value is not stable across the API
+(sometimes `list[str]`, sometimes `str`). Clients must tolerate both.
+🔁 **FOLLOW-UP: API-04 (unified error contract).**
+
+### 5.3 Status codes that are *not* currently used
+
+* `409 Conflict` — never returned. Business conflicts (invalid FSM transition,
+  already-cancelled order, coupon exhausted, insufficient stock) surface as
+  `400` from `ValidationError`. ❓ **DECISION REQUIRED:** keep `400` for all
+  business-rule conflicts, or introduce `409` for state conflicts (API-04).
+* `405` is produced by DRF automatically for a method not implemented on a
+  matched route (e.g. `PUT /api/v1/cart/`).
+* `502 Bad Gateway` is used by exactly one endpoint (payment webhook, §11).
+* `503` is used by exactly one endpoint (health, §9.14).
+
+---
+
+## 6. Pagination conventions and current exceptions
+
+### 6.1 Configured default ✅ **CURRENT**
+
+`REST_FRAMEWORK["DEFAULT_PAGINATION_CLASS"] = PageNumberPagination`,
+`PAGE_SIZE = 20`. **However**, every endpoint in this API is a plain `APIView`
+(no `ListAPIView`, no `ViewSet`), so the default pagination class is **never
+applied automatically**. Pagination only happens where a view opts in.
+
+### 6.2 Classification of every collection endpoint
+
+**A. Paginated — DRF `PageNumberPagination` shape**
+
+| Endpoint | Shape |
+|---|---|
+| `GET /api/v1/catalog/products/` | `{"count": int, "next": url\|null, "previous": url\|null, "results": [...]}` — page size 20, `?page=`; `page_size` is accepted by the query serializer but **ignored** by the paginator (`PAGE_SIZE_QUERY_PARAM` is unset). ⚠️ **GAP** |
+
+**B. Paginated — bespoke shape (reviews only)**
+
+| Endpoint | Shape |
+|---|---|
+| `GET /api/v1/reviews/` (`ordering` ≠ `helpful`) | `{"count", "page", "page_size", "total_pages", "results"}` |
+| `GET /api/v1/reviews/` (`ordering=helpful`) | `{"count", "page", "page_size", "results"}` — **no `total_pages`**, and sorting is done in Python over the fully materialised queryset. ⚠️ **GAP** (shape drift *within one endpoint* + unbounded memory) |
+
+**C. Intentionally non-paginated (bare JSON array)** — small, bounded
+collections; documented as a deliberate decision:
+
+`GET /api/v1/catalog/categories/` (tree; pagination would break the hierarchy),
+`GET /api/v1/catalog/brands/`,
+`GET /api/v1/catalog/products/by-slugs/` (hard cap of 20 slugs),
+`GET /api/v1/users/addresses/` (per-user cap),
+`GET /api/v1/shipping/methods/`.
+
+**D. Non-paginated and potentially unbounded** ⚠️ **GAP** — these return a bare
+JSON array (or an embedded array) whose size grows with the dataset:
+
+`GET /api/v1/orders/`, `GET /api/v1/payments/`,
+`GET /api/v1/inventory/`, `GET /api/v1/inventory/{variant_id}/movements/`,
+`GET /api/v1/pricing/variants/{variant_id}/history/`,
+`GET /api/v1/discounts/coupons/`,
+`GET /api/v1/shipping/shipments/`,
+`GET /api/v1/notifications/`, `GET /api/v1/notifications/unread/`,
+`GET /api/v1/wishlist/` (items embedded in the object),
+`GET /api/v1/cart/` (items embedded in the object).
+
+**No pagination behaviour is normalized by API-01.**
+🔁 **FOLLOW-UP: API-05 (collection/pagination contract).**
+
+❓ **DECISION REQUIRED (API-05):** one envelope for all collections
+(`count`/`next`/`previous`/`results` vs `count`/`page`/`page_size`/`total_pages`),
+whether embedded child collections (cart items, wishlist items, payment events,
+product variants/images) are exempt, and whether `page_size` becomes a
+first-class query parameter.
+
+---
+
+## 7. Identifier conventions
+
+✅ **CURRENT** — identifier semantics differ per resource and are load-bearing:
+
+| Resource | Path identifier | Format / converter | Notes |
+|---|---|---|---|
+| User (self) | none | — | Always `me`. |
+| Address | `address_id` | `<int>` (BigAutoField PK) | Owner-scoped. |
+| Product (read) | `identifier` | `<str>` — **UUID or slug** | The view tries `uuid.UUID(identifier)`; on `ValueError` it falls back to slug lookup. |
+| Product (update) | `uuid` | `<uuid>` converter | UUID only; a non-UUID never matches the route → `404`. |
+| Product (payload / listing output) | `id` | **UUID** | `ProductListSerializer.id` / `ProductDetailSerializer.id` both serialize the product **UUID**, not the integer PK. ⚠️ **GAP — `id` is a UUID here but an integer everywhere else.** |
+| Product (reviews filter / create) | `product_id` or `product_uuid` | int PK *or* UUID | Two parallel identifier spaces on one resource. ⚠️ **GAP** |
+| Category / Brand / Tag | `slug` | `<slug>` converter (`[-a-zA-Z0-9_]+`) | SEO identifiers. |
+| Product variant | `variant_id` | `<int>` PK | Used by cart, wishlist, inventory, pricing. |
+| Cart | none | — | Resolved from JWT user or session key. |
+| Cart item | `item_id` | `<int>` PK | Ownership checked in service. |
+| Order | `order_number` | `<str>`, format `ORD-` + zero-padded sequence (e.g. `ORD-000001`) | Public identifier; internal PK is never in the URL. |
+| Order (in payloads) | `order_id` | `<int>` PK | ⚠️ **GAP** — `POST /payments/`, `POST /discounts/apply|remove/`, `POST /shipping/shipments/create/` take the **integer PK**, while every order URL uses `order_number`. |
+| Payment | `payment_number` | `<str>`, format `PAY-` + zero-padded sequence (e.g. `PAY-000001`) | ⚠️ Stored in the model field literally named `order_number`; the URL kwarg is `payment_number`. Confusing but client-invisible. |
+| Payment (external) | `external_id` | provider string, unique | Webhook correlation key. |
+| Shipment | `pk` | `<int>` PK | ⚠️ **GAP** — the only order-adjacent resource still exposing a raw PK. |
+| Shipment tracking | `tracking` | `<str>` — external carrier number **or** internal `SHP-00000001` | Public lookup matches either field. |
+| Review | `review_id` | `<int>` PK | |
+| Notification | `pk` | `<int>` PK | |
+| Wishlist item | `item_id` | `<int>` PK | |
+| Coupon | `code` | `<str>` in request body | Never in a path. |
+
+❓ **DECISION REQUIRED:** whether `id` in catalog product payloads keeps meaning
+"UUID" at freeze, and whether cross-context references to orders standardize on
+`order_number`.
+
+---
+
+## 8. Money / Decimal and timestamp conventions
+
+### 8.1 Money ✅ **CURRENT**
+
+* Monetary values are `DecimalField`s on the models and serializers.
+* DRF's `COERCE_DECIMAL_TO_STRING` is **not overridden**, so it is `True`:
+  **money is serialized as a JSON string**, e.g. `"1500.00"`.
+* Scale is 2 decimal places; typical precision is `max_digits=12`.
+* Requests may send money as a JSON string or number; DRF coerces both.
+* Some endpoints stringify money manually (`str(order.total)` in
+  `/discounts/apply/` and `/discounts/remove/`, `revenue`/`total_spent` in
+  analytics `Top*` serializers are declared as `CharField`). The wire result is
+  the same string form; the schema type differs. ⚠️ **GAP (schema-level only).**
+* Currency: `Price.currency` is a `ChoiceField` exposed on `PriceSerializer`.
+  Order/payment/shipping amounts carry **no currency field** — a single implicit
+  currency is assumed. ❓ **DECISION REQUIRED** before freeze.
+* Server-authoritative amounts: order `delivery_cost`, `discount` and `total`
+  are computed server-side; a client-supplied `delivery_cost` on order creation
+  is rejected (`400`).
+
+### 8.2 Timestamps ✅ **CURRENT**
+
+* `USE_TZ = True`; all datetimes are stored and emitted in **UTC**.
+* Serialization uses DRF's default ISO-8601 (`DATETIME_FORMAT` is not
+  overridden), e.g. `"2026-09-04T12:34:56.789012Z"`. Microseconds are present
+  when non-zero; the `Z` suffix denotes UTC.
+* Date-only fields (`date_of_birth`) are ISO `YYYY-MM-DD`.
+* Nullable timestamps (`paid_at`, `cancelled_at`, `shipped_at`, `delivered_at`,
+  `confirmed_at`, `refunded_at`, `read_at`, `sent_at`, `published_at`) are
+  `null` until the corresponding transition occurs.
+* `?days=N` analytics windows are computed relative to server "now" in UTC.
+
+### 8.3 Nullable / empty semantics ✅ **CURRENT**
+
+* Optional text fields default to `""` (empty string), not `null`
+  (`notes`, `note`, `reason`, `title`, `description`, `tracking_number`).
+* Optional FK/date fields are `null`.
+* Image fields serialize to a URL string or `null`.
+* Empty collections are `[]` (bare-array endpoints) or `{"count": 0, …,
+  "results": []}` (paginated endpoints) — never `null`, never `204`.
+
+---
+
+## 9. Endpoint inventory
+
+Legend: **Auth** = Public / Auth / Staff. All paths are absolute and require the
+trailing slash. Unless noted, `401` applies to Auth/Staff endpoints when the
+token is absent/invalid, `403` when the caller is authenticated but not
+permitted, and `429` when throttled.
+
+### 9.1 Users & authentication (`apps.users`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 1 | POST | `/api/v1/auth/register/` | Public |
+| 2 | POST | `/api/v1/auth/login/` | Public |
+| 3 | POST | `/api/v1/auth/refresh/` | Public |
+| 4 | POST | `/api/v1/auth/change-password/` | Auth |
+| 5 | POST | `/api/v1/auth/password-reset/` | Public |
+| 6 | POST | `/api/v1/auth/password-reset/confirm/` | Public |
+| 7 | GET/PATCH/DELETE | `/api/v1/users/me/` | Auth |
+| 8 | GET/POST | `/api/v1/users/addresses/` | Auth |
+| 9 | GET/PATCH/DELETE | `/api/v1/users/addresses/{address_id}/` | Auth |
+| 10 | POST | `/api/v1/users/addresses/{address_id}/default/` | Auth |
+
+**1. `POST /auth/register/`** — Public.
+Body (the **inline** `RegisterInputSerializer` declared in
+`apps/users/api_views/auth_views.py`): `email` (email, required), `username`
+(≤150, required), `password` (≥8, write-only), `password_confirm` (≥8),
+`first_name`, `last_name` (optional, default `""`).
+⚠️ **GAP** — a *second*, different `RegisterInputSerializer` exists in
+`apps/users/serializers/user_serializers.py` and additionally declares `phone`.
+The view uses the inline one, so **`phone` is not accepted at registration**;
+the exported serializer is dead code that misrepresents the contract.
+`201` → `{"id": int, "email", "username", "first_name", "last_name"}`.
+`400`: validation errors; mismatched passwords →
+`{"password_confirm": ["Пароли не совпадают."]}`; duplicate email/username →
+`{"email": "…"}` / `{"username": "…"}` as a **string** ⚠️ **GAP** (§5.2).
+Email uniqueness is case-insensitive (`email__iexact`). Not idempotent.
+
+**2. `POST /auth/login/`** — Public. Body `{"email", "password"}`.
+`200` → `{"access": "<jwt>", "refresh": "<jwt>"}`. `401` on bad credentials or
+inactive user (`{"detail": "No active account found with the given credentials"}`).
+Authentication classes are empty on this view (`permission_classes = []` in the
+resolved route), so an existing token is ignored.
+
+**3. `POST /auth/refresh/`** — Public (SimpleJWT `TokenRefreshView`).
+Body `{"refresh"}`. `200` → `{"access", "refresh"}` (rotation is on, so a new
+refresh token is issued and the old one is blacklisted). `401` on an expired,
+malformed or blacklisted token. **Not idempotent** — replaying the same refresh
+token after rotation fails with `401`.
+
+**4. `POST /auth/change-password/`** — Auth.
+Body `old_password`, `new_password` (≥8), `new_password_confirm`.
+`200` → `{"detail": "Пароль успешно изменён."}`.
+`400` on mismatch or wrong current password (`{"old_password": "…"}`, string).
+⚠️ **GAP** — existing tokens are **not** invalidated after a password change.
+🔁 **FOLLOW-UP: API-03.**
+
+**5. `POST /auth/password-reset/`** — Public. Body `{"email"}`.
+Always `200` → `{"detail": "Если email существует, письмо отправлено."}`
+(deliberate account-enumeration protection). Email delivery is dispatched via
+Celery, falling back to synchronous `send_mail` on broker/import failure.
+Idempotent from the client's perspective; each call mints a new token.
+
+**6. `POST /auth/password-reset/confirm/`** — Public.
+Body `uid` (urlsafe-base64 of the user PK), `token` (Django default token
+generator), `new_password` (8–128), `new_password_confirm`.
+`200` → `{"detail": "Пароль успешно изменён."}`.
+`400` → `{"detail": "Недействительная ссылка для сброса пароля."}` (bad uid) or
+`{"detail": "Недействительный или просроченный токен."}`. Token validity is
+governed by `PASSWORD_RESET_TIMEOUT`. Single-use in effect: the token stops
+validating once the password hash changes.
+
+**7. `/users/me/`** — Auth.
+`GET` `200` → `UserDetailSerializer`: `id`, `email`, `username`, `first_name`,
+`last_name`, `full_name`, `phone`, `is_active`, `date_joined`,
+`profile{avatar, date_of_birth, gender, timezone, language, email_subscribed}`.
+`PATCH` body (`UpdateProfileInputSerializer`, all optional): `first_name`,
+`last_name`, `phone`, `date_of_birth`, `gender` (choice), `timezone`,
+`language`, `email_subscribed` → `200` with the same payload. Note: the input
+serializer is instantiated **without** `partial=True`, but every field is
+declared `required=False`, so partial updates work.
+`DELETE` → `200` `{"detail": "Аккаунт деактивирован."}` — **soft delete**
+(`is_active=False`), not `204`, and the record is retained. ⚠️ **GAP** —
+`DELETE` returning `200` with a body deviates from the `204` convention used by
+address/review/wishlist deletes.
+
+**8. `/users/addresses/`** — Auth.
+`GET` `200` → **bare array** of `AddressOutputSerializer`
+(`id`, `recipient_name`, `country`, `region`, `city`, `street`, `postal_code`,
+`notes`, `is_default`, `created_at`, `updated_at`), default address first, then
+by date. Not paginated (§6 class C).
+`POST` body `AddressInputSerializer` (`recipient_name`, `country`, `region`,
+`city`, `street`, `postal_code`, `notes`, `is_default`) → `201` with the created
+address. `400` when the per-user address limit is exceeded.
+
+**9. `/users/addresses/{address_id}/`** — Auth, `address_id` int.
+`GET` `200`; `PATCH` (partial) `200`; `DELETE` `204` (no body).
+**Ownership:** lookups are scoped by `user=request.user`; another user's address
+yields `404 {"detail": "Адрес не найден."}` — never `403` (§10).
+
+**10. `POST /users/addresses/{address_id}/default/`** — Auth.
+`200` → the address, now `is_default=true`; all other addresses of the user are
+demoted. **Idempotent**: repeating the call is a no-op returning `200`.
+`404` if not owned.
+
+### 9.2 Catalog (`apps.catalog`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 11 | GET | `/api/v1/catalog/products/` | Public |
+| 12 | GET | `/api/v1/catalog/products/by-slugs/` | Public |
+| 13 | POST | `/api/v1/catalog/products/create/` | Staff (inline check) |
+| 14 | GET | `/api/v1/catalog/products/{identifier}/` | Public |
+| 15 | PATCH | `/api/v1/catalog/products/{uuid}/update/` | Staff (inline check) |
+| 16 | GET | `/api/v1/catalog/categories/` | Public |
+| 17 | GET | `/api/v1/catalog/categories/{slug}/` | Public |
+| 18 | GET | `/api/v1/catalog/brands/` | Public |
+| 19 | GET | `/api/v1/catalog/brands/{slug}/` | Public |
+
+**11. `GET /catalog/products/`** — Public. **Paginated (DRF shape, §6 class A).**
+Query parameters (validated by `ProductListQuerySerializer`; unknown parameters
+are ignored):
+
+| Param | Type | Semantics |
+|---|---|---|
+| `category` | slug | Filter by active category (incl. descendants). Unknown slug → `404`. |
+| `brand` | slug | Filter by active brand. Unknown slug → `404`. |
+| `tag` | slug | Filter by active tag. Unknown slug → `404`. |
+| `min_price` / `max_price` | decimal ≥ 0, 2 dp | Denormalized price-range filter. |
+| `search` | string ≤ 200 | Full-text search (PostgreSQL `SearchVector`). |
+| `ordering` | string | Whitelist: `created_at`, `-created_at`, `min_price`, `-min_price`, `rating`, `-rating`, `views_count`, `-views_count`, `name`, `-name`. **Any other value silently falls back to `-created_at`** ⚠️ **GAP** (invalid input is not rejected). Default `-created_at`. |
+| `page` | int ≥ 1 | Page number. Out-of-range → `404`. |
+| `page_size` | int 1–100 | **Accepted and validated but ignored** — page size is fixed at 20. ⚠️ **GAP**. |
+| `is_featured`, `status` | bool / string | Declared on the query serializer but **not passed to the service** — currently inert. ⚠️ **GAP**. |
+
+`200` → `{"count", "next", "previous", "results": [ProductListSerializer]}`.
+`ProductListSerializer`: `id` (**UUID**), `name`, `slug`, `brand_name`,
+`brand_slug`, `primary_category_name`, `primary_category_slug`, `main_image`
+(URL|null), `min_price`/`max_price` (money strings|null), `price_range` (string),
+`rating` (decimal string), `reviews_count`, `is_featured`, `status`,
+`published_at`, `created_at`.
+`400` on malformed query parameters (e.g. `min_price=abc`).
+⚠️ **GAP:** the service computes `applied_filters` but the view discards it —
+the response carries no echo of the applied filters.
+
+**12. `GET /catalog/products/by-slugs/?slugs=a,b,c`** — Public.
+Comma-separated slugs, **hard-capped at the first 20**; extra values are
+silently dropped ⚠️ **GAP** (silent truncation, no `400`). Missing/empty
+`slugs` → `200 []`. `200` → **bare array** of `ProductListSerializer`, ordered
+by the queryset, **not** by the order of the requested slugs. Unknown slugs are
+omitted silently.
+
+**13. `POST /catalog/products/create/`** — Staff.
+Body `CreateProductInputSerializer`: `name` (≤255), `brand_id` (int ≥ 1),
+`primary_category_id` (int ≥ 1), `description`, `manufacturer_code`, `status`
+(choice), `is_featured`, `category_ids` (list[int]), `tag_ids` (list[int]).
+`201` → `ProductDetailSerializer`. `403` `{"detail": "Недостаточно прав."}` for
+non-staff (⚠️ non-DRF body). `400` on validation; `404` if a referenced brand or
+category does not exist. Slug and UUID are generated server-side. Not idempotent.
+
+**14. `GET /catalog/products/{identifier}/`** — Public. `identifier` is a UUID
+**or** a slug (§7). `200` → `ProductDetailSerializer`: `id` (**UUID**), `uuid`,
+`name`, `slug`, `description`, `status`, brand/category denormalized fields,
+`main_image`, `categories`, `images[]`, `variants[]`, `tags`, `min_price`,
+`max_price`, `price_range`, `rating`, `display_rating`, `reviews_count`,
+`views_count`, `is_featured`, `manufacturer_code`, `published_at`,
+`meta_title`, `meta_description`, `created_at`, `updated_at`.
+`404` if not found or not visible.
+**Side effect:** every successful `GET` increments `views_count` — this
+"read" endpoint is **not** side-effect free. ❓ **DECISION REQUIRED**
+(document as intended, or move view tracking to an explicit event endpoint).
+
+**15. `PATCH /catalog/products/{uuid}/update/`** — Staff. Body
+`UpdateProductInputSerializer` (same fields as create, all optional).
+`200` → `ProductDetailSerializer`. `403` non-staff (custom body), `404` unknown
+UUID, `400` validation. A non-UUID path segment does not match the route → `404`.
+
+**16. `GET /catalog/categories/`** — Public. `200` → **bare array**, recursive
+tree: `id`, `name`, `slug`, `url_path`, `depth`, `is_active`, `children[]`.
+Intentionally non-paginated (§6 class C).
+
+**17. `GET /catalog/categories/{slug}/`** — Public. `200` → `id`, `name`, `slug`,
+`description`, `image`, `url_path`, `full_name_cached`, `depth`, `is_active`,
+`breadcrumbs[{name, slug, url_path}]`, `products_count`, `meta_title`,
+`meta_description`. `404` unknown/inactive slug.
+
+**18. `GET /catalog/brands/`** — Public. `200` → **bare array** of
+`{id, name, slug, logo}` for active brands. Intentionally non-paginated.
+
+**19. `GET /catalog/brands/{slug}/`** — Public. `200` →
+`{id, name, slug, description, logo, products_count}`. `404` unknown slug.
+
+### 9.3 Cart (`apps.cart`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 20 | GET | `/api/v1/cart/` | Public (guest or user) |
+| 21 | DELETE | `/api/v1/cart/` | Public |
+| 22 | POST | `/api/v1/cart/items/` | Public |
+| 23 | PATCH | `/api/v1/cart/items/{item_id}/` | Public |
+| 24 | DELETE | `/api/v1/cart/items/{item_id}/` | Public |
+| 25 | POST | `/api/v1/cart/merge/` | Auth |
+
+Cart resolution ✅ **CURRENT**: with a JWT the cart is the user's active cart;
+without one it is the cart bound to the Django `session_key` (created on
+demand). Both are created lazily, so the cart endpoints never `404` on "no cart".
+
+`CartSerializer` payload: `{"id": int, "items": [CartItemSerializer],
+"total": "0.00", "total_quantity": int}`; `CartItemSerializer`:
+`{id, product_name, sku, price, quantity, total_price}` (money as strings).
+Cart items are embedded and **never paginated**.
+
+**20. `GET /cart/`** → `200` cart (empty cart → `items: []`, `total: "0.00"`).
+**21. `DELETE /cart/`** → **`200` with the emptied cart body** (not `204`)
+⚠️ **GAP** — inconsistent with other `DELETE`s. Idempotent.
+**22. `POST /cart/items/`** — body `{"variant_id": int ≥ 1, "quantity": int}`.
+`201` → **the whole cart** (not the created item). Adding an existing variant
+**increments** the quantity, so repeated identical calls are *cumulative*, not
+idempotent. `400` on validation or insufficient stock; `404` unknown variant.
+**23. `PATCH /cart/items/{item_id}/`** — body `{"quantity": int}`. `200` → whole
+cart. Setting quantity to 0 removes the line (service behaviour). `404` if the
+item does not belong to the caller's cart (ownership enforced in
+`CartService`, §10). `400` on stock violation.
+**24. `DELETE /cart/items/{item_id}/`** → **`200` with the whole cart** (not
+`204`) ⚠️ **GAP**. `404` if not owned.
+**25. `POST /cart/merge/`** — Auth, empty body. Merges the guest cart identified
+by the current `session_key` into the user's cart.
+`200` → merged cart; `400 {"detail": "Сессия гостя не найдена."}` when the
+request carries no session; `404 {"detail": "Гостевая корзина не найдена."}`.
+Required because JWT login does not fire `user_logged_in`. Effectively
+idempotent (a second call finds no guest cart → `404`).
+⚠️ **GAP:** merge depends on a cookie-backed session travelling alongside a
+stateless JWT — a cross-mechanism coupling that API-03 must confirm or replace.
+
+### 9.4 Orders (`apps.orders`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 26 | GET | `/api/v1/orders/` | Auth |
+| 27 | POST | `/api/v1/orders/` | Auth |
+| 28 | GET | `/api/v1/orders/{order_number}/` | Auth (owner or staff) |
+| 29 | PATCH | `/api/v1/orders/{order_number}/status/` | Staff |
+| 30 | POST | `/api/v1/orders/{order_number}/cancel/` | Auth (owner or staff) |
+
+**26. `GET /orders/`** → `200` **bare array** of `OrderListSerializer`
+(`id`, `order_number`, `status`, `status_display`, `total`, `items_count`,
+`created_at`), scoped to `request.user`. Not paginated ⚠️ **GAP** (§6 class D).
+Staff see only their own orders here — there is no admin order list endpoint.
+⚠️ **GAP / ❓ DECISION REQUIRED.**
+
+**27. `POST /orders/`** — body `{"notes": str}` (optional).
+`201` → `OrderSerializer`: `id`, `order_number`, `status`, `status_display`,
+`is_terminal`, `items[]`, `subtotal`, `delivery_cost`, `discount`, `total`,
+`recipient_name`, `full_address`, `notes`, `cancellation_reason`,
+`cancelled_at`, `confirmed_at`, `delivered_at`, `created_at`.
+Failure modes (all from the service): empty cart → `400`; no default address →
+`400`; total below `MIN_ORDER_TOTAL` → `400`; insufficient stock → `400`;
+`delivery_cost` supplied in the body → `400` (server-authoritative pricing).
+**Not idempotent** — no idempotency key; a retried POST creates a second order.
+⚠️ **GAP / ❓ DECISION REQUIRED (API-07).**
+
+**28. `GET /orders/{order_number}/`** → `200` `OrderSerializer`.
+**Ownership:** a non-staff caller requesting someone else's order receives
+`404 {"detail": "Заказ не найден."}`, deliberately identical to the
+"does not exist" response (§10).
+
+**29. `PATCH /orders/{order_number}/status/`** — Staff. Body
+`{"status": <OrderStatus choice>}`. `200` → full `OrderSerializer`.
+Transitions are validated by the order FSM; an illegal transition → `400`.
+`status=cancelled` is routed through `OrderService.cancel()` (the single
+cancellation path, coordinating coupon release, inventory and payment).
+`404` for an unknown order number (no ownership masking — the caller is staff).
+Idempotent only insofar as the FSM allows the same target state.
+
+**30. `POST /orders/{order_number}/cancel/`** — Auth. Body `{"reason": str}`
+(optional). `200` → `OrderSerializer`. Allowed for the owner while the order is
+not terminal, and always for staff. Terminal order → `400`. Non-owner → `404`.
+Second cancel of an already-cancelled order → `400`.
+
+### 9.5 Inventory (`apps.inventory`) — Staff only
+
+| # | Method | Path |
+|---|---|---|
+| 31 | GET | `/api/v1/inventory/` |
+| 32 | GET | `/api/v1/inventory/{variant_id}/` |
+| 33 | POST | `/api/v1/inventory/{variant_id}/restock/` |
+| 34 | POST | `/api/v1/inventory/{variant_id}/adjust/` |
+| 35 | GET | `/api/v1/inventory/{variant_id}/movements/` |
+
+All require `IsAdminUser` (`401` anonymous, `403` authenticated non-staff).
+
+**31.** `200` → **bare array** of `StockSerializer`
+(`id`, `variant_id`, `sku`, `product_name`, `quantity`, `reserved_quantity`,
+`available_quantity`, `is_low_stock`, `is_out_of_stock`,
+`low_stock_threshold`). Not paginated, whole-catalogue scan ⚠️ **GAP**.
+**32.** `200` → one `StockSerializer`; the stock row is **created on demand** if
+absent, so a `GET` can write ⚠️ **GAP** (side-effecting read).
+`404 {"detail": "Вариант товара не найден."}` for an unknown variant.
+**33.** Body `{"quantity": int > 0, "note": str}` → `201` `StockMovementSerializer`
+(`id`, `kind`, `kind_display`, `delta`, `quantity_before`, `quantity_after`,
+`note`, `order_number`, `performed_by_email`, `created_at`). Cumulative, **not**
+idempotent.
+**34.** Body `{"new_quantity": int ≥ 0, "note": str}` → **`200`** (not `201`,
+although it also creates a `StockMovement` row) ⚠️ **GAP**. Sets an absolute
+value, therefore effectively idempotent.
+**35.** `200` → **bare array** of movements, newest first. When no `Stock` row
+exists the endpoint returns `200 []` rather than `404` ⚠️ **GAP** (inconsistent
+with #32, which `404`s only for an unknown variant).
+
+### 9.6 Pricing (`apps.pricing`) — Staff only
+
+| # | Method | Path |
+|---|---|---|
+| 36 | GET | `/api/v1/pricing/variants/{variant_id}/price/` |
+| 37 | POST | `/api/v1/pricing/variants/{variant_id}/price/` |
+| 38 | GET | `/api/v1/pricing/variants/{variant_id}/history/` |
+| 39 | POST | `/api/v1/pricing/prices/bulk/` |
+
+**36.** `200` → `PriceSerializer` (`id`, `variant`, `price`, `sale_price`,
+`currency`, `effective_price`, `discount_percent`, `created_at`, `updated_at`).
+`404 {"detail": "Вариант не найден."}` or `404 {"detail": "Цена не задана."}`
+— two distinct `404` meanings on one route ⚠️ **GAP**.
+**37.** Body `{"price": decimal, "sale_price": decimal|null, "reason": str}` →
+**`200`** even when the price row is created ⚠️ **GAP** (upsert returning `200`).
+Writes a `PriceHistory` audit row with `changed_by = request.user`. Idempotent
+for identical payloads in effect, but each call appends history.
+**38.** `200` → **bare array** of `PriceHistorySerializer` (`id`, `old_price`,
+`new_price`, `old_sale_price`, `new_sale_price`, `changed_by` (PK), `reason`,
+`created_at`), newest first. Not paginated ⚠️ **GAP**.
+**39.** Body `{"prices": [{"variant_id", "price", "sale_price?"}, …]}` →
+`200` **bare array** of resulting `PriceSerializer` objects. Atomic
+(`transaction.atomic` in the service): all or nothing. `400` if any entry is
+invalid. ❓ **DECISION REQUIRED:** partial-success semantics are explicitly *not*
+supported; confirm at freeze.
+
+### 9.7 Payments (`apps.payments`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 40 | GET | `/api/v1/payments/` | Auth |
+| 41 | POST | `/api/v1/payments/` | Auth |
+| 42 | POST | `/api/v1/payments/webhook/` | Public + HMAC |
+| 43 | GET | `/api/v1/payments/{payment_number}/` | Auth (owner or staff) |
+| 44 | POST | `/api/v1/payments/{payment_number}/refund/` | Staff |
+| 45 | POST | `/api/v1/payments/{payment_number}/cancel/` | Auth (owner or staff) |
+
+**40.** `200` → **bare array** of `PaymentListSerializer` (`id`, `order_number`,
+`status`, `status_display`, `amount`, `method`, `method_display`, `provider`,
+`created_at`, `paid_at`), scoped to the caller. Not paginated ⚠️ **GAP**.
+**41.** Body `{"order_id": int, "amount": decimal?, "method": choice
+(default `card`), "provider": str (default `mock`)}`. When `amount` is omitted
+the order total is used. `201` → `PaymentSerializer` (adds `is_terminal`,
+`is_paid`, `is_refundable`, `refund_amount`, `external_id`, `order`, `user`,
+`paid_at`, `cancelled_at`, `refunded_at`, `note`, `refund_reason`, `metadata`,
+`events[]`, `updated_at`). `404` unknown order.
+⚠️ **GAP — IDOR:** `Order.objects.get(pk=data['order_id'])` is **not scoped to
+the caller**; the ownership decision is delegated to `PaymentService`. This is
+the only place where an order is fetched by raw PK without an inline owner
+filter. 🔁 **FOLLOW-UP** (see §13, follow-up F-3).
+**42.** See §11.
+**43.** `200` → `PaymentSerializer` with the full event history. Non-owner →
+`404 {"detail": "Платёж не найден."}`.
+**44.** Staff. Body `{"amount": decimal?, "reason": str?}` → `200`
+`PaymentSerializer`. Omitting `amount` refunds the full amount. `400` if the
+payment is not refundable or the amount exceeds the refundable balance.
+**Not idempotent** — repeated calls accumulate refunds up to the cap.
+**45.** Body `{"reason": str?}` → `200`. Owner or staff; non-owner → `404`.
+`400` if the payment is terminal.
+
+### 9.8 Reviews (`apps.reviews`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 46 | GET | `/api/v1/reviews/` | Public |
+| 47 | POST | `/api/v1/reviews/` | Auth |
+| 48 | GET | `/api/v1/reviews/{review_id}/` | Public |
+| 49 | PATCH | `/api/v1/reviews/{review_id}/` | Auth (author) |
+| 50 | DELETE | `/api/v1/reviews/{review_id}/` | Auth (author or staff) |
+| 51 | POST | `/api/v1/reviews/{review_id}/helpful/` | Auth |
+
+**46. `GET /reviews/`** — Public, **paginated with a bespoke envelope** (§6 B).
+Query parameters (parsed by hand, not by a serializer ⚠️ **GAP**):
+
+| Param | Behaviour |
+|---|---|
+| `product_id` | int; non-numeric → `400 {"product_id": …}`. |
+| `product_uuid` | UUID; ignored when `product_id` is present; malformed or unknown → empty result set (**not** `400`/`404`) ⚠️ **GAP**. |
+| `user_id` | int. **Silently coerced** to the caller's own id for non-staff users ⚠️ **GAP** (a request for another user's reviews returns *your* reviews). Anonymous callers get `200 []` — a **bare array**, breaking the envelope of the same endpoint ⚠️ **GAP**. |
+| `rating`, `rating_gte`, `rating_lte` | int; non-numeric → `400`. No 1–5 range enforcement on `rating_gte`/`rating_lte`. |
+| `verified` | truthy tokens `true`/`1`/`yes` only; anything else is ignored. |
+| `ordering` | `rating`, `-rating`, `created_at`, `-created_at`, `helpful`; invalid values fall back to `-created_at` silently ⚠️ **GAP**. |
+| `page`, `page_size` | `int()` without try/except → a non-numeric value raises `ValueError` → **`500`** ⚠️ **GAP (defect-level)**. `page_size` capped at 100. |
+
+Default scope when neither `product_id`, `product_uuid` nor `user_id` is given:
+the caller's own reviews (authenticated) or `200 []` (anonymous).
+Only approved reviews are listed. Response items are `ReviewListSerializer`
+(`id`, `user_id`, `user_email`, `product_id`, `rating`, `title`,
+`verified_purchase`, `helpful_yes`, `helpful_no`, `helpful_score`, `my_vote`,
+`created_at`); `my_vote` is populated only for authenticated callers.
+`ordering=helpful` sorts in Python over the entire matched set.
+
+**47. `POST /reviews/`** — Auth. Body `product_id` **or** `product_uuid`,
+`rating` (1–5), `text`, `title?`. `201` → `ReviewSerializer`. Unknown product →
+`404`; neither identifier supplied → **`404`** `{"detail": "Укажите product_id
+или product_uuid."}` — a validation error returned as `404` ⚠️ **GAP**.
+Duplicate review by the same user for the same product → `400` from the service.
+
+**48–50. `/reviews/{review_id}/`.** `GET` is public but an unapproved review is
+visible only to its author or staff, otherwise `404` (§10). `PATCH` (author
+only; body `rating?`, `title?`, `text?`) → `200`. `DELETE` (author or staff) →
+`204`. Non-author `PATCH` → `403` from the service.
+
+**51. `POST /reviews/{review_id}/helpful/`** — Auth. Body `{"vote": "yes"|"no"}`.
+`200` → `ReviewSerializer` plus `my_vote`. **Toggle semantics:** repeating the
+same vote clears it; the opposite vote switches it. Therefore **not idempotent**
+— identical repeated calls alternate between voted and cleared.
+❓ **DECISION REQUIRED:** freeze toggle semantics or move to explicit
+`PUT`/`DELETE` of a vote sub-resource.
+
+### 9.9 Discounts (`apps.discounts`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 52 | GET | `/api/v1/discounts/coupons/` | Staff |
+| 53 | POST | `/api/v1/discounts/apply/` | Auth |
+| 54 | POST | `/api/v1/discounts/remove/` | Auth |
+| 55 | POST | `/api/v1/discounts/preview/` | Auth |
+
+**52.** `200` → **bare array** of `CouponListSerializer` (`id`, `code`,
+`discount_type`, `discount_value`, `max_discount`, `min_order_amount`,
+`is_valid_now`, `is_exhausted`, `started_at`, `ended_at`) for currently valid
+coupons. Not paginated ⚠️ **GAP**.
+**53.** Body `{"code": str, "order_id": int}`. The order is fetched with
+`user=request.user`, so another user's order → `404 {"detail": "Заказ не
+найден."}`. `200` → `{"order_id": int, "discount": "…", "total": "…"}` —
+a **bespoke mini-payload**, not the order representation ⚠️ **GAP**.
+`400` for an invalid/expired/exhausted coupon or an unmet minimum.
+**54.** Body `{"order_id": int}` validated by hand →
+`400 {"order_id": "Обязательное поле."}` when missing ⚠️ **GAP**.
+`200` → same mini-payload. Idempotent.
+**55.** Body `{"code": str, "order_amount": decimal}` → `200`
+`{code, discount_type, discount_value, max_discount, calculated_discount,
+amount_after_discount}`. Pure computation, no side effects, idempotent.
+`400`/`404` for an unknown or invalid coupon.
+
+### 9.10 Shipping (`apps.shipping`)
+
+| # | Method | Path | Auth |
+|---|---|---|---|
+| 56 | GET | `/api/v1/shipping/methods/` | Auth |
+| 57 | POST | `/api/v1/shipping/calculate/` | Auth |
+| 58 | GET | `/api/v1/shipping/shipments/` | Auth |
+| 59 | POST | `/api/v1/shipping/shipments/create/` | Staff |
+| 60 | GET | `/api/v1/shipping/shipments/{pk}/` | Auth (owner or staff) |
+| 61 | PATCH | `/api/v1/shipping/shipments/{pk}/status/` | Staff |
+| 62 | POST | `/api/v1/shipping/shipments/{pk}/tracking/` | Staff |
+| 63 | GET | `/api/v1/shipping/track/{tracking}/` | **Public** |
+
+**56.** Query `zone_code?`, `region?`, `shipping_type?` — free-form strings,
+unvalidated ⚠️ **GAP**. `200` → **bare array** of `ShippingMethodListSerializer`
+(`id`, `name`, `shipping_type`, `zone_name`, `base_price`, `price_per_kg`,
+`free_shipping_threshold`, `estimated_days_display`, `is_active`).
+⚠️ **GAP / ❓ DECISION REQUIRED:** this is reference data yet requires
+authentication, which prevents a guest checkout from showing delivery options.
+**57.** Body `order_total` (required), `zone_code?`, `region?`,
+`shipping_type?`, `weight_kg?` → `200`
+`{"zone": ShippingZone|null, "methods": [{method_id, method_name,
+shipping_type, cost, estimated_days_display, is_free}]}`. Pure computation.
+Note `cost` is emitted by a hand-built dict, so its JSON type follows the
+underlying `Decimal` serialization of `ShippingCostResponseSerializer`'s
+declared fields ⚠️ **GAP (schema-level)**.
+**58.** `200` → **bare array** of `ShipmentListSerializer`. Staff see **all**
+shipments; other users see only their own. Not paginated ⚠️ **GAP**.
+**59.** Staff. Note the path is `/shipments/create/`, not `POST /shipments/`
+⚠️ **GAP** (non-RESTful, inconsistent with orders/payments). Body `order_id`,
+`method_id`, `weight_kg?`, `notes?` → `201` `ShipmentDetailSerializer`.
+`404` for an unknown order or method.
+**60.** `200` → `ShipmentDetailSerializer`. A non-staff caller asking for
+someone else's shipment gets `404 {"detail": "Отправление не найдено."}` (§10).
+**61.** Staff. Body `{"status": str, "tracking_number": str?}` → `200`.
+`status` is a plain `CharField` here (not a `ChoiceField`), so the valid set is
+enforced only by the service FSM ⚠️ **GAP**. Illegal transition → `400`.
+**62.** Staff. Body `{"tracking_number": str}` → `200` full shipment.
+Idempotent (absolute set). Note this is a `POST` that sets a single field,
+whereas #61 uses `PATCH` ⚠️ **GAP (method semantics)**.
+**63.** **Public** (`permission_classes = ()` — no authentication at all).
+`tracking` matches either the carrier `tracking_number` **or** the internal
+`SHP-XXXXXXXX` code. `200` → `ShipmentTrackingSerializer` (`internal_tracking`,
+`tracking_number`, `status`, `status_display`, `method_name`,
+`estimated_days_display`, `shipped_at`, `created_at`) — deliberately minimal, no
+customer or address data. `404` if not found.
+⚠️ **GAP:** internal tracking codes are **sequential and guessable**, so this
+public endpoint permits enumeration of shipment status. It is also exempt from
+per-user throttling (anonymous rate only). ❓ **DECISION REQUIRED.**
+
+### 9.11 Wishlist (`apps.wishlist`) — all Auth
+
+| # | Method | Path |
+|---|---|---|
+| 64 | GET | `/api/v1/wishlist/` |
+| 65 | POST | `/api/v1/wishlist/add/` |
+| 66 | DELETE | `/api/v1/wishlist/remove/{item_id}/` |
+| 67 | POST | `/api/v1/wishlist/move-to-cart/` |
+| 68 | POST | `/api/v1/wishlist/clear/` |
+
+**64.** `200` → `WishlistSerializer` `{id, items_count, items[], created_at,
+updated_at}`; created on demand, so it never `404`s. `WishlistItemSerializer`:
+`id`, `variant_id`, `product_name`, `variant_name`, `sku`, `effective_price`,
+`is_available`, `image_url`, `note`, `sort_order`, `created_at`. Items embedded,
+never paginated.
+**65.** Body `{"variant_id": int, "note": str?}` → `201` `WishlistItemSerializer`.
+Unknown variant → `404`. Adding an existing variant returns the existing item
+(idempotent in effect) but still with `201` ⚠️ **GAP**.
+**66.** `204`, no body. Ownership enforced in the service; removing a
+non-existent/foreign item does not leak existence.
+**67.** Body `{"item_ids": [int]?, "variant_id": int?, "quantity": int=1}` →
+`200 {"moved": int}`. Bespoke counter payload; the resulting cart is **not**
+returned ⚠️ **GAP**. Requires an authenticated cart.
+**68.** `200 {"removed": int}`. Idempotent (second call returns `0`).
+Note this is a `POST`, whereas the cart's clear operation is a `DELETE`
+⚠️ **GAP (method semantics)**.
+
+### 9.12 Notifications (`apps.notifications`) — all Auth
+
+| # | Method | Path |
+|---|---|---|
+| 69 | GET | `/api/v1/notifications/` |
+| 70 | GET | `/api/v1/notifications/unread/` |
+| 71 | GET | `/api/v1/notifications/unread-count/` |
+| 72 | POST | `/api/v1/notifications/read-all/` |
+| 73 | POST | `/api/v1/notifications/{pk}/read/` |
+
+**69.** `200` → **bare array** of `NotificationListSerializer` (`id`,
+`notification_type`, `title`, `status`, `is_read`, `created_at`). Not paginated
+⚠️ **GAP** — an unbounded, monotonically growing per-user collection.
+**70.** `200` → **bare array** of the *full* `NotificationSerializer`
+(`id`, `notification_type`, `channel`, `title`, `body`, `status`,
+`related_object_type`, `related_object_id`, `action_url`, `is_read`, `sent_at`,
+`read_at`, `created_at`). ⚠️ **GAP** — two list endpoints on the same resource
+return **different representations**.
+**71.** `200 {"unread_count": int}`.
+**72.** `200 {"marked": int}`. Idempotent (second call returns `0`).
+**73.** `200` → the full notification. Ownership is enforced in
+`NotificationService.mark_read(pk, user)`; a foreign id raises `NotFound` →
+`404`. Idempotent.
+
+### 9.13 Analytics (`apps.analytics`) — all Staff (`IsAdminUser`)
+
+| # | Method | Path | Extra query params |
+|---|---|---|---|
+| 74 | GET | `/api/v1/analytics/dashboard/` | `days` |
+| 75 | GET | `/api/v1/analytics/sales/` | `days` |
+| 76 | GET | `/api/v1/analytics/sales/timeline/` | `days`, `period` |
+| 77 | GET | `/api/v1/analytics/top-products/` | `days`, `metric`, `limit` |
+| 78 | GET | `/api/v1/analytics/top-categories/` | `days`, `limit` |
+| 79 | GET | `/api/v1/analytics/top-customers/` | `days`, `limit` |
+| 80 | GET | `/api/v1/analytics/conversion/` | `days` |
+| 81 | GET | `/api/v1/analytics/most-viewed/` | `days`, `limit` |
+
+* `days` is validated by `AnalyticsDateRangeSerializer` (integer, bounded,
+  default 30); an invalid value → `400`.
+* `limit` is parsed with a bare `int(request.query_params.get('limit', 10))`
+  — **no validation, no upper bound**; a non-numeric value raises `ValueError`
+  → **`500`** ⚠️ **GAP (defect-level)**. Same class of issue as reviews `page`.
+* `metric` (`revenue` default) and `period` (`daily` default) are free-form
+  strings interpreted by the service; unknown values are not rejected at the
+  API boundary ⚠️ **GAP**.
+* Response shapes are plain service dictionaries, **not** passed through the
+  declared `*Serializer` classes in `apps/analytics/serializers.py`
+  ⚠️ **GAP** — the serializers document the intent, the views bypass them.
+  `sales/timeline/` wraps its list as `{"timeline": [...]}`; the other list
+  endpoints return **bare arrays**. Money in `Top*` payloads is a string.
+* All are read-only, idempotent, and non-paginated (bounded by `limit`).
+
+### 9.14 Health (`apps.core`)
+
+**82. `GET /api/v1/health/`** — **Public**, and served by a plain Django `View`
+(`JsonResponse`), *not* by DRF: no JWT parsing, no throttling, no DRF renderer,
+no OpenAPI schema entry ⚠️ **GAP**.
+`200 {"status": "ok", "version": "1.0.0", "database": "ok"}` when
+`connection.ensure_connection()` succeeds;
+`503 {"status": "degraded", "version": "1.0.0", "database": "error"}` when it
+raises `django.db.Error`. `version` is a **hard-coded literal**, not derived
+from the release ⚠️ **GAP**. Only `GET` is allowed (`405` otherwise).
+
+### 9.15 Schema & docs (drf-spectacular)
+
+**83. `GET /api/v1/schema/`** — Public. `SpectacularAPIView`. Returns the
+OpenAPI 3 document (YAML by default; `?format=json` for JSON).
+`SERVE_INCLUDE_SCHEMA = False`, so the schema endpoint does not document itself.
+**84. `GET /api/v1/docs/`** — Public. `SpectacularSwaggerView` — Swagger UI
+bound to `url_name="schema"`. Serves HTML.
+Both are unauthenticated in every environment, including production
+⚠️ **GAP / ❓ DECISION REQUIRED (API-02).**
+
+**Endpoint total: 84 routes** across 15 groups (counting each HTTP method on a
+shared path separately where the semantics differ, as enumerated above).
+
+---
+
+## 10. Ownership / IDOR semantics
+
+✅ **CURRENT — the "404 not 403" policy.** For resources owned by a user, the API
+deliberately returns `404 Not Found` (never `403`) when the caller is
+authenticated but not the owner, so that the response is indistinguishable from
+"this resource does not exist". This prevents resource-existence enumeration.
+
+Endpoints applying the policy:
+
+| Resource | Mechanism |
+|---|---|
+| Address | `Address.objects.get(pk=…, user=request.user)` → `NotFound` |
+| Order | fetch by `order_number`, then `if not is_staff and order.user_id != user.pk: raise NotFound` |
+| Payment | same pattern on `payment_number` |
+| Shipment | non-staff query runs against `request.user.shipments` → `DoesNotExist` → `NotFound` |
+| Cart item | ownership checked inside `CartService` against the resolved cart |
+| Wishlist item | ownership checked inside `WishlistService` |
+| Notification | ownership checked inside `NotificationService.mark_read` |
+| Review (unapproved) | invisible to anyone but its author and staff → `404` |
+| Discount apply/remove | `Order.objects.get(pk=…, user=request.user)` → `404` |
+
+**Staff bypass:** `is_staff` users bypass the ownership filter on orders,
+payments and shipments (they see everything).
+
+**Exceptions to the policy (deliberate `403`):**
+
+* Review `PATCH` by a non-author → `403` (the review is publicly visible
+  anyway, so no existence is leaked).
+* Catalog product create/update by a non-staff user → `403` with a custom body.
+* Any `IsAdminUser` endpoint hit by an authenticated non-staff user → `403`.
+
+⚠️ **GAP:** `POST /api/v1/payments/` fetches the target order by raw PK with no
+inline owner scoping (§9.7 #41) — the only place where the pattern is not applied
+at the view boundary. 🔁 **FOLLOW-UP [F-3 (#68)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/68).**
+
+⚠️ **GAP:** `GET /api/v1/reviews/?user_id=<other>` silently rewrites the filter
+to the caller's own id instead of returning `403`/`404`/`400` — a third,
+undocumented behaviour for a non-owner request.
+
+---
+
+## 11. Action, idempotency and webhook semantics
+
+### 11.1 Action endpoints ✅ **CURRENT**
+
+Non-CRUD operations are modelled as `POST` to a verb sub-path
+(`/cancel/`, `/refund/`, `/helpful/`, `/default/`, `/merge/`, `/restock/`,
+`/adjust/`, `/read-all/`, `/{id}/read/`, `/clear/`, `/move-to-cart/`,
+`/calculate/`, `/preview/`, `/apply/`, `/remove/`, `/tracking/`), while state
+*transitions* driven by an FSM use `PATCH` to a `/status/` sub-path
+(orders, shipments).
+
+⚠️ **GAP — status code inconsistency across creating actions:**
+`POST /cart/items/` → `201` (returns the *cart*), `POST /inventory/{id}/restock/`
+→ `201`, `POST /inventory/{id}/adjust/` → `200` (also creates a movement),
+`POST /pricing/variants/{id}/price/` → `200` (may create a price),
+`POST /wishlist/add/` → `201` even when the item already existed.
+🔁 **FOLLOW-UP: API-04/API-05.**
+
+### 11.2 Idempotency summary ✅ **CURRENT**
+
+| Idempotent | Not idempotent |
+|---|---|
+| `PATCH /users/me/`, address CRUD, `POST /addresses/{id}/default/` | `POST /auth/register/` |
+| `DELETE /cart/`, `PATCH /cart/items/{id}/` (absolute quantity) | `POST /cart/items/` (increments) |
+| `POST /notifications/read-all/`, `/{id}/read/` | `POST /orders/` (**no idempotency key**) |
+| `POST /wishlist/clear/`, `POST /shipments/{id}/tracking/` | `POST /payments/`, `POST /payments/{n}/refund/` |
+| `POST /inventory/{id}/adjust/`, `POST /discounts/preview/`, `POST /shipping/calculate/` | `POST /inventory/{id}/restock/` |
+| Order/shipment status transitions (FSM rejects repeats with `400`) | `POST /reviews/{id}/helpful/` (**toggles**) |
+
+⚠️ **GAP:** the API accepts **no** `Idempotency-Key` header anywhere. Order and
+payment creation are the two operations where a client retry after a network
+timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
+
+### 11.3 Payment webhook — `POST /api/v1/payments/webhook/` ✅ **CURRENT**
+
+* **Authentication:** none in the DRF sense (`authentication_classes = []`,
+  `permission_classes = (AllowAny,)`). Security is provided by an
+  **HMAC-SHA256** signature over the **raw request body**, presented in the
+  `X-Webhook-Signature` header as lowercase hex, compared with
+  `hmac.compare_digest` (timing-safe) against `settings.PAYMENT_WEBHOOK_SECRET`.
+* **Fail-closed:** if `PAYMENT_WEBHOOK_SECRET` is unset/empty, or the header is
+  missing, or the digest does not match → `403 {"detail": "Invalid payment
+  webhook signature."}`. Neither the secret nor the signature is ever logged.
+* **Body** (`HandleWebhookInputSerializer`): `external_id` (str, required),
+  `event_type` (str, required), `status` (choice, required), `payload`
+  (JSON object, optional). Invalid → `400`.
+* **Success:** `200` with the full `PaymentSerializer`.
+* **Unknown `external_id`:** `200 {"detail": "Платёж не найден, webhook
+  logged."}` — deliberately `200` so the provider does not retry forever.
+* **Order already finished** (`delivered`/`cancelled`): the payment is failed
+  and a `PaymentEvent` is recorded; response `200 {"detail": "Заказ завершён;
+  платёж отклонён."}`.
+* **Transient order-confirmation failure:** `502 {"detail": "Подтверждение
+  заказа не удалось; повторите запрос позже."}` — an explicit *retry me* signal
+  to the provider. This is the only `502` in the API.
+* **Idempotency/replay:** `Payment.external_id` carries a **unique constraint**
+  (migration `payments/0004_payment_external_id_unique`), and repeated webhooks
+  for the same `external_id` are absorbed by `PaymentService.handle_webhook`
+  with an appended `PaymentEvent` audit trail. There is no timestamp/nonce in
+  the signed payload, so a captured request body remains replayable indefinitely.
+  ❓ **DECISION REQUIRED:** add a signed timestamp + freshness window before
+  freeze (see ADR-004).
+* Design rationale is recorded in `docs/adr/ADR-004-secure-idempotent-payment-webhooks.md`.
+
+---
+
+## 12. OpenAPI / drf-spectacular relationship
+
+✅ **CURRENT**
+
+* `drf_spectacular` is installed and configured:
+  `DEFAULT_SCHEMA_CLASS = "drf_spectacular.openapi.AutoSchema"`,
+  `SPECTACULAR_SETTINGS = {TITLE: "Amazone Clone API", DESCRIPTION:
+  "Marketplace API", VERSION: "1.0.0", SERVE_INCLUDE_SCHEMA: False}`.
+* Schema is served live at `/api/v1/schema/` and Swagger UI at `/api/v1/docs/`.
+* Views are annotated with `@extend_schema` / `@extend_schema_view` for
+  summaries, request serializers and (partly) response serializers.
+
+⚠️ **GAP — the schema is not a guaranteed contract boundary:**
+
+1. **Optional imports.** Nearly every `api_views` module wraps the import in
+   `try: from drf_spectacular.utils import … except ImportError:` and falls back
+   to no-op decorators. If the dependency were absent, the application would
+   still boot and serve — but with **no schema annotations at all** and a
+   silently degraded `/api/v1/schema/`. Schema generation is therefore
+   *best-effort*, not enforced.
+2. **No generated artifact is committed** and **no CI check** validates the
+   schema or diffs it against a baseline.
+3. **Incomplete annotations.** Response schemas are declared as string literals
+   in places (`responses={200: 'Discount applied'}`, `'Moved'`, `'Cleared'`,
+   `'Removed'`), and the ad-hoc dict responses (discounts, wishlist, analytics,
+   notification counters, shipping calculate) are not backed by serializers.
+4. **Query parameters** are only modelled where a query serializer exists
+   (catalog listing). Reviews, analytics, shipping methods and inventory
+   parameters are undocumented in the schema.
+5. **`/api/v1/health/` is a plain Django view** and is absent from the schema.
+6. **Pagination shapes** (`reviews` bespoke envelope, bare arrays) are not
+   reflected accurately.
+7. `SERVE_INCLUDE_SCHEMA = False`; both docs endpoints are unauthenticated.
+
+**Precedence rule until API-02 lands:** where this document and the generated
+OpenAPI schema disagree, **`docs/api/API_CONTRACT.md` is normative.**
+🔁 **FOLLOW-UP: API-02** must make schema generation mandatory (remove the
+optional-import fallbacks), commit/validate an artifact in CI, and then invert
+this precedence rule so that OpenAPI becomes the machine-readable source of
+truth with this document as its prose companion.
+
+---
+
+## 13. Contract gaps and follow-up issues
+
+The table below is the complete list of material gaps found by API-01.
+"Owner" names the API Freeze ticket that must resolve it. An **F-n** owner links
+to a dedicated GitHub issue created by API-01, because that item falls outside
+the API-02…API-07 scope statements.
+
+| # | Gap | Where | Owner |
+|---|---|---|---|
+| G-1 | Three different collection shapes (DRF envelope / bespoke reviews envelope / bare array) and 11 unbounded non-paginated collections | §6 | **API-05** |
+| G-2 | `page_size` accepted but ignored on catalog listing; not supported elsewhere | §9.2 | **API-05** |
+| G-3 | Reviews list changes shape within one endpoint (`ordering=helpful` drops `total_pages`; anonymous `user_id` returns a bare array) | §9.8 | **API-05** |
+| G-4 | `400` bodies are sometimes `{"field": ["msg"]}` and sometimes `{"field": "msg"}` | §5.2 | **API-04** |
+| G-5 | No machine-readable error codes; messages are Russian free text | §4, §5 | **API-04** |
+| G-6 | Business conflicts return `400`; `409` is never used | §5.3 | **API-04** |
+| G-7 | Custom `403` body for catalog staff checks instead of the DRF default | §3.2 | **API-04** |
+| G-8 | `DELETE` semantics inconsistent: `204` (address/review/wishlist) vs `200`+body (cart, cart item) vs `200`+`detail` soft delete (`/users/me/`) | §9.1, §9.3 | **API-04** |
+| G-9 | Creating actions return mixed `200`/`201` | §11.1 | **API-04** |
+| G-10 | No logout endpoint; password change does not invalidate tokens; guest-cart merge couples JWT to a cookie session | §3.1, §9.3 | **API-03** |
+| G-11 | Unauthenticated `/api/v1/schema/` and `/api/v1/docs/` in production | §9.15 | **API-02** |
+| G-12 | Optional `drf_spectacular` imports make schema generation best-effort; no committed artifact, no CI validation | §12 | **API-02** |
+| G-13 | `int()` on `page`/`page_size` (reviews) and `limit` (analytics) without try/except → `500` on non-numeric input | §9.8, §9.13 | **[F-1 (#66)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)** |
+| G-14 | Reviews list query parameters are hand-parsed; `ordering` and `product_uuid` fail silently instead of `400` | §9.8 | **API-05** (with [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)) |
+| G-15 | `?ordering=` invalid value silently falls back on catalog listing; `is_featured`/`status` query params are inert | §9.2 | **API-05** |
+| G-16 | `GET /reviews/?user_id=<other>` silently rewrites to the caller's id | §9.8, §10 | **[F-2 (#67)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/67)** |
+| G-17 | `POST /payments/` resolves the order by raw PK without inline owner scoping | §9.7, §10 | **[F-3 (#68)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/68)** |
+| G-18 | Public `/shipping/track/{tracking}/` is enumerable via sequential `SHP-` codes | §9.10 | **[F-4 (#69)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/69)** |
+| G-19 | `GET /shipping/methods/` requires authentication although it is reference data (blocks guest checkout) | §9.10 | **[F-5 (#70)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/70)** |
+| G-20 | No `Idempotency-Key` support; `POST /orders/` and `POST /payments/` are duplicable on retry | §11.2 | **API-07** |
+| G-21 | Webhook signature has no timestamp/nonce → indefinite replay window | §11.3 | **[F-6 (#71)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/71)** |
+| G-22 | Side-effecting reads: `GET /catalog/products/{id}/` increments views; `GET /inventory/{variant_id}/` creates a Stock row | §9.2, §9.5 | **[F-7 (#72)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/72)** |
+| G-23 | Identifier drift: catalog `id` is a UUID; cross-context order references use the integer PK while order URLs use `order_number`; shipments expose a raw PK | §7 | **[F-8 (#73)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/73)** |
+| G-24 | Notification list vs unread list return different representations of the same resource | §9.12 | **API-05** |
+| G-25 | Analytics views bypass their own serializers; `metric`/`period` unvalidated | §9.13 | **API-02** (schema) + [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66) |
+| G-26 | Bespoke mini-payloads for discounts apply/remove and wishlist move-to-cart instead of the affected resource | §9.9, §9.11 | **API-04** |
+| G-27 | `/api/v1/health/` is outside DRF and outside OpenAPI; `version` is hard-coded | §9.14 | **[F-9 (#74)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/74)** |
+| G-28 | No currency field on order/payment/shipping money; single implicit currency | §8.1 | **[F-10 (#75)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/75)** |
+| G-29 | `POST /reviews/` returns `404` for a missing-identifier validation error | §9.8 | **API-04** |
+| G-30 | `GET /orders/` has no staff-wide variant; `PATCH /orders/{n}/status/` is staff-only but there is no way for staff to list all orders via the API | §9.4 | **[F-11 (#76)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/76)** |
+| G-31 | `POST /shipping/shipments/create/` instead of `POST /shipping/shipments/`; `POST …/tracking/` vs `PATCH …/status/`; `POST /wishlist/clear/` vs `DELETE /cart/` | §9.10, §9.11 | **API-04** |
+| G-31a | Duplicate `RegisterInputSerializer` (inline view copy vs exported module copy declaring `phone`); the exported one is dead code | §9.1 | **[F-12 (#77)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/77)** |
+
+**Contract decisions made inside API-01** (resolved here, no follow-up needed):
+
+1. The `404`-instead-of-`403` ownership policy is **normative and intentional**
+   (§10) — it is documented, not treated as a bug.
+2. Money is a **JSON string** with 2 decimal places (§8.1) — normative.
+3. Timestamps are **UTC ISO-8601 with a `Z` suffix** (§8.2) — normative.
+4. Empty optional text is `""`, empty collections are `[]` (§8.3) — normative.
+5. Categories, brands, addresses, shipping methods and `by-slugs` are
+   **intentionally non-paginated** (§6 class C) — normative, exempt from API-05.
+6. Payment webhook `200`-on-unknown-payment and `502`-on-transient-failure are
+   **intentional provider-retry signalling** (§11.3) — normative.
+7. Path-based versioning with no DRF versioning class is **intentional** (§2).
+8. Until API-02 completes, **this document outranks the generated OpenAPI
+   schema** (§12).
+
+---
+
+## 14. Freeze-readiness notes
+
+API v1 **cannot be frozen** until the following are closed:
+
+| Ticket | Must resolve |
+|---|---|
+| **API-02 — OpenAPI contract** | Remove the optional `drf_spectacular` import fallbacks so schema generation is mandatory; annotate every response (no string-literal responses); document query parameters; include health; commit and CI-validate a schema artifact; decide on protecting `/schema/` and `/docs/`; invert the precedence rule in §12. Closes G-11, G-12, G-25. |
+| **API-03 — Authentication contract** | Logout / refresh-token revocation; token invalidation on password change; the JWT↔session coupling in `/cart/merge/`. Closes G-10. |
+| **API-04 — Error contract** | One error envelope with stable machine-readable codes; `400` body type consistency; `409` decision; `DELETE`/creation status-code normalization; replace bespoke mini-payloads. Closes G-4…G-9, G-26, G-29, G-31. |
+| **API-05 — Collection/pagination contract** | One pagination envelope; `page_size` as a first-class parameter; paginate the 11 unbounded collections; unify notification representations; validate list query parameters. Closes G-1, G-2, G-3, G-14, G-15, G-24. |
+| **API-06 — API integration/contract tests** | Executable tests asserting every claim in §9 (status codes, shapes, ownership `404`s, pagination envelopes, webhook signature handling), so the contract cannot silently drift. |
+| **API-07 — End-to-end business scenarios** | Idempotency keys for order and payment creation; the full guest→cart→order→payment→shipment→review journey as a contract-level scenario. Closes G-20. |
+| **New follow-ups [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)–[#77](https://github.com/Kvasha62/Amazone_Clone_Production/issues/77)** | The defect- and policy-level items in §13 that are out of scope for API-02…API-07 and each need their own issue. |
+| **Final Backend/API Freeze Audit** | Re-run this inventory against the routing tree and confirm zero undocumented public endpoints. |
+
+Once all of the above are closed and this document has been regenerated against
+the then-current tree, API v1 may be declared frozen: any subsequent
+client-visible change requires `/api/v2/` or an explicit, versioned deprecation.
+
+---
+
+## 15. Verification performed by API-01
+
+* Endpoint inventory was produced by walking the live Django URL resolver
+  (`get_resolver()`), not by reading docstrings — **84 `/api/v1/` routes**, all
+  represented in §9. No public `/api/v1/` endpoint was found that is absent from
+  this document.
+* Permission classes, HTTP methods and serializer field sets were introspected
+  from the loaded application (`permission_classes`, `Serializer().fields`).
+* `python manage.py check --fail-level WARNING` → *System check identified no
+  issues (0 silenced).*
+* `python manage.py makemigrations --check --dry-run` → *No changes detected.*
+* `git diff --check` → clean.
+* This change is documentation-only: no Python file, route, serializer,
+  permission or migration was modified.
