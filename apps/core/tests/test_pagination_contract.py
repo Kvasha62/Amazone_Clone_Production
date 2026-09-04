@@ -10,6 +10,7 @@ from django.urls import reverse
 from rest_framework import status
 
 from apps.catalog.constants import ProductStatus
+from apps.core.pagination import DEFAULT_PAGE_SIZE
 from apps.catalog.models import Product
 from apps.catalog.tests.factories import CatalogTestCase
 from apps.discounts.tests.factories import create_test_coupon
@@ -126,7 +127,12 @@ class PaginationContractTests(CatalogTestCase):
     # ------------------------------------------------------------------
 
     def _paginated_endpoints(self):
-        """Return every public collection endpoint classified as paginated."""
+        """Return every public collection endpoint classified as paginated.
+
+        Each item is ``(label, url, user, base_params)``. ``base_params`` are the
+        query parameters required to observe an existing collection for that
+        endpoint (for example ``product_id`` for the public reviews list).
+        """
         price_history_url = reverse(
             'pricing:variant-price-history',
             kwargs={'variant_id': self.variant_128.pk},
@@ -136,78 +142,116 @@ class PaginationContractTests(CatalogTestCase):
             kwargs={'variant_id': self.variant_128.pk},
         )
         return [
-            ('products', reverse('catalog:product-list'), None),
-            ('orders', reverse('orders:order-list'), self.user),
-            ('payments', reverse('payments:payment-list'), self.user),
-            ('inventory', reverse('inventory:stock-list'), self.staff),
-            ('movements', movements_url, self.staff),
-            ('price-history', price_history_url, self.staff),
-            ('coupons', reverse('discounts:coupon-list'), self.staff),
-            ('shipments', reverse('shipping:shipment-list'), self.user),
-            ('notifications', reverse('notifications:notification-list'), self.user),
-            ('notifications-unread', reverse('notifications:notification-unread'), self.user),
+            ('products', reverse('catalog:product-list'), None, {}),
+            ('orders', reverse('orders:order-list'), self.user, {}),
+            ('payments', reverse('payments:payment-list'), self.user, {}),
+            ('inventory', reverse('inventory:stock-list'), self.staff, {}),
+            ('movements', movements_url, self.staff, {}),
+            ('price-history', price_history_url, self.staff, {}),
+            ('coupons', reverse('discounts:coupon-list'), self.staff, {}),
+            ('shipments', reverse('shipping:shipment-list'), self.user, {}),
+            ('notifications', reverse('notifications:notification-list'), self.user, {}),
+            ('notifications-unread', reverse('notifications:notification-unread'), self.user, {}),
+            ('reviews', reverse('reviews:review-list'), None, {
+                'product_id': self.product.pk,
+            }),
         ]
+
+    def _request_paginated(self, url, user, base_params, params):
+        """Issue a request to a paginated endpoint with merged query params."""
+        self.client.force_authenticate(user or None)
+        query = dict(base_params)
+        query.update(params)
+        return self.client.get(url, query)
 
     # ------------------------------------------------------------------
     # Canonical shape + pagination bounds
     # ------------------------------------------------------------------
 
     def test_every_paginated_endpoint_returns_canonical_shape(self):
-        for label, url, user in self._paginated_endpoints():
+        for label, url, user, base_params in self._paginated_endpoints():
             with self.subTest(endpoint=label):
-                self.client.force_authenticate(user or None)
-                response = self.client.get(url)
+                response = self._request_paginated(url, user, base_params, {})
                 self.assertEqual(response.status_code, status.HTTP_200_OK)
                 assert_canonical_shape(self, response.data)
                 self.assertGreaterEqual(response.data['count'], 1)
 
-    def test_every_paginated_endpoint_rejects_page_size_zero(self):
-        for label, url, user in self._paginated_endpoints():
+    def test_every_paginated_endpoint_uses_default_page_and_page_size(self):
+        for label, url, user, base_params in self._paginated_endpoints():
             with self.subTest(endpoint=label):
-                self.client.force_authenticate(user or None)
-                response = self.client.get(url, {'page_size': 0})
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-                self.assertEqual(response.data['error']['code'], 'validation_error')
-                self.assertTrue(response.data['error']['details'])
+                response = self._request_paginated(url, user, base_params, {})
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(response.data['page'], 1)
+                self.assertEqual(response.data['page_size'], DEFAULT_PAGE_SIZE)
+                self.assertEqual(
+                    response.data['total_pages'],
+                    (response.data['count'] + DEFAULT_PAGE_SIZE - 1)
+                    // DEFAULT_PAGE_SIZE,
+                )
 
-    def test_every_paginated_endpoint_rejects_non_integer_page(self):
-        for label, url, user in self._paginated_endpoints():
+    def test_every_paginated_endpoint_honours_custom_page_size_and_bounds(self):
+        for label, url, user, base_params in self._paginated_endpoints():
             with self.subTest(endpoint=label):
-                self.client.force_authenticate(user or None)
-                response = self.client.get(url, {'page': 'abc'})
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-                self.assertEqual(response.data['error']['code'], 'validation_error')
+                # Minimum (1) and an explicit custom page_size.
+                minimum = self._request_paginated(
+                    url, user, base_params, {'page_size': 1},
+                )
+                self.assertEqual(minimum.status_code, status.HTTP_200_OK)
+                self.assertEqual(minimum.data['page_size'], 1)
+                self.assertEqual(len(minimum.data['results']), 1)
 
-    def test_page_size_minimum_and_custom(self):
-        self.client.force_authenticate(self.user)
-        url = reverse('orders:order-list')
-        response = self.client.get(url, {'page_size': 1})
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['page_size'], 1)
-        self.assertEqual(len(response.data['results']), 1)
+                # Maximum allowed page_size (100) is accepted.
+                maximum = self._request_paginated(
+                    url, user, base_params, {'page_size': 100},
+                )
+                self.assertEqual(maximum.status_code, status.HTTP_200_OK)
+                self.assertEqual(maximum.data['page_size'], 100)
+                self.assertEqual(maximum.data['count'], minimum.data['count'])
 
-    def test_page_size_above_max_uses_error_envelope(self):
-        self.client.force_authenticate(self.user)
-        url = reverse('orders:order-list')
-        response = self.client.get(url, {'page_size': 101})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data['error']['code'], 'validation_error')
+                # Above maximum, zero and negative are API-04 validation errors.
+                for params in (
+                    {'page_size': 101},
+                    {'page_size': 0},
+                    {'page_size': -1},
+                ):
+                    with self.subTest(endpoint=label, params=params):
+                        response = self._request_paginated(
+                            url, user, base_params, params,
+                        )
+                        self.assertEqual(
+                            response.status_code, status.HTTP_400_BAD_REQUEST,
+                        )
+                        self.assertEqual(
+                            response.data['error']['code'], 'validation_error',
+                        )
 
-    def test_negative_page_size_uses_error_envelope(self):
-        self.client.force_authenticate(self.user)
-        url = reverse('orders:order-list')
-        response = self.client.get(url, {'page_size': -1})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data['error']['code'], 'validation_error')
+    def test_every_paginated_endpoint_rejects_non_integer_page_params(self):
+        for label, url, user, base_params in self._paginated_endpoints():
+            for params in ({'page': 'abc'}, {'page_size': 'abc'}):
+                with self.subTest(endpoint=label, params=params):
+                    response = self._request_paginated(
+                        url, user, base_params, params,
+                    )
+                    self.assertEqual(
+                        response.status_code, status.HTTP_400_BAD_REQUEST,
+                    )
+                    self.assertEqual(
+                        response.data['error']['code'], 'validation_error',
+                    )
 
-    def test_zero_and_negative_page_use_error_envelope(self):
-        self.client.force_authenticate(self.user)
-        url = reverse('orders:order-list')
-        for params in ({'page': 0}, {'page': -1}):
-            with self.subTest(params=params):
-                response = self.client.get(url, params)
-                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-                self.assertEqual(response.data['error']['code'], 'validation_error')
+    def test_every_paginated_endpoint_rejects_zero_and_negative_page(self):
+        for label, url, user, base_params in self._paginated_endpoints():
+            for params in ({'page': 0}, {'page': -1}):
+                with self.subTest(endpoint=label, params=params):
+                    response = self._request_paginated(
+                        url, user, base_params, params,
+                    )
+                    self.assertEqual(
+                        response.status_code, status.HTTP_400_BAD_REQUEST,
+                    )
+                    self.assertEqual(
+                        response.data['error']['code'], 'validation_error',
+                    )
 
     # ------------------------------------------------------------------
     # First / middle / last / beyond-last pages
@@ -258,16 +302,86 @@ class PaginationContractTests(CatalogTestCase):
         self.assertIsNone(response.data['next'])
         self.assertIsNone(response.data['previous'])
 
+    def test_reviews_empty_collection_uses_canonical_envelope(self):
+        # The public reviews list for a product with no reviews still returns
+        # the canonical empty envelope (not a bare array, not a 404).
+        reviewless_product = self.products[1]
+        response = self.client.get(
+            reverse('reviews:review-list'),
+            {'product_id': reviewless_product.pk},
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['count'], 0)
+        self.assertEqual(response.data['results'], [])
+        self.assertEqual(response.data['total_pages'], 0)
+        self.assertEqual(response.data['page'], 1)
+        self.assertEqual(response.data['page_size'], DEFAULT_PAGE_SIZE)
+        self.assertIsNone(response.data['next'])
+        self.assertIsNone(response.data['previous'])
+
     # ------------------------------------------------------------------
     # Deterministic page boundaries
     # ------------------------------------------------------------------
 
+    def test_every_paginated_endpoint_first_middle_last_and_beyond_last_pages(self):
+        for label, url, user, base_params in self._paginated_endpoints():
+            with self.subTest(endpoint=label):
+                total = self._request_paginated(
+                    url, user, base_params, {'page_size': 1},
+                ).data['count']
+
+                first = self._request_paginated(
+                    url, user, base_params, {'page': 1, 'page_size': 1},
+                )
+                self.assertEqual(first.status_code, status.HTTP_200_OK)
+                self.assertEqual(first.data['page'], 1)
+                self.assertEqual(len(first.data['results']), 1)
+                self.assertIsNone(first.data['previous'])
+                if total > 1:
+                    self.assertIsNotNone(first.data['next'])
+
+                if total >= 2:
+                    # With page_size=1, page 2 is the last page when total == 2.
+                    middle_page = 2
+                    middle = self._request_paginated(
+                        url, user, base_params,
+                        {'page': middle_page, 'page_size': 1},
+                    )
+                    self.assertEqual(middle.status_code, status.HTTP_200_OK)
+                    self.assertEqual(middle.data['page'], middle_page)
+                    self.assertEqual(len(middle.data['results']), 1)
+                    self.assertIsNotNone(middle.data['previous'])
+
+                last = self._request_paginated(
+                    url, user, base_params, {'page': total, 'page_size': 1},
+                )
+                self.assertEqual(last.status_code, status.HTTP_200_OK)
+                self.assertEqual(last.data['page'], total)
+                self.assertEqual(len(last.data['results']), 1)
+                self.assertIsNone(last.data['next'])
+                if total > 1:
+                    self.assertIsNotNone(last.data['previous'])
+
+                beyond = self._request_paginated(
+                    url, user, base_params,
+                    {'page': total + 10, 'page_size': 1},
+                )
+                self.assertEqual(beyond.status_code, status.HTTP_200_OK)
+                self.assertEqual(beyond.data['page'], total + 10)
+                self.assertEqual(beyond.data['results'], [])
+                self.assertEqual(beyond.data['count'], total)
+                self.assertIsNone(beyond.data['next'])
+                # API-05: for page > total_pages, previous points to the last
+                # available page (documented previous page semantics).
+                self.assertIsNotNone(beyond.data['previous'])
+                self.assertIn(f'page={total}', beyond.data['previous'])
+
     def test_every_paginated_endpoint_has_stable_non_overlapping_pages(self):
-        for label, url, user in self._paginated_endpoints():
+        for label, url, user, base_params in self._paginated_endpoints():
             with self.subTest(endpoint=label):
                 self.client.force_authenticate(user or None)
-                page_one = self.client.get(url, {'page': 1, 'page_size': 1})
-                page_two = self.client.get(url, {'page': 2, 'page_size': 1})
+                page_one = self.client.get(url, {**base_params, 'page': 1, 'page_size': 1})
+                page_two = self.client.get(url, {**base_params, 'page': 2, 'page_size': 1})
                 self.assertEqual(page_one.status_code, status.HTTP_200_OK)
                 self.assertEqual(page_two.status_code, status.HTTP_200_OK)
                 if page_one.data['count'] < 2:
@@ -279,7 +393,7 @@ class PaginationContractTests(CatalogTestCase):
                 second_ids = {item['id'] for item in page_two.data['results']}
                 self.assertFalse(first_ids & second_ids)
                 # Re-requesting the first page yields the identical item.
-                page_one_repeat = self.client.get(url, {'page': 1, 'page_size': 1})
+                page_one_repeat = self.client.get(url, {**base_params, 'page': 1, 'page_size': 1})
                 self.assertEqual(
                     [item['id'] for item in page_one_repeat.data['results']],
                     list(first_ids),
