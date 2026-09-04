@@ -46,8 +46,29 @@ API v1 is **not frozen**. The freeze gate is described in §14.
   purely a URL prefix declared in `config/urls.py`.
 * There is no content negotiation on version, no `Accept-Version` header, and no
   deprecation header mechanism.
-* Renderer: JSON only (`DEFAULT_RENDERER_CLASSES = (JSONRenderer,)`). The
-  browsable API is disabled; unsupported `Accept` values yield `406`.
+* Renderers — the JSON-only rule applies to **API resource endpoints**, not to
+  the schema/docs endpoints:
+  * **API resource endpoints** (every route in §9.1–§9.14): JSON only. The
+    global `DEFAULT_RENDERER_CLASSES = (JSONRenderer,)` is in force, the
+    browsable API is disabled, and an `Accept` header that cannot be satisfied
+    with `application/json` yields `406 Not Acceptable`
+    (verified: `GET /api/v1/catalog/products/` with `Accept: text/html` → `406`).
+  * **`GET /api/v1/schema/`** (§9.15) — an OpenAPI **schema** endpoint, not an
+    API resource. `SpectacularAPIView` **overrides** the global renderers with
+    its own set, so it serves OpenAPI schema media types:
+    `application/vnd.oai.openapi` (YAML, the default),
+    `application/yaml`, `application/vnd.oai.openapi+json` and
+    `application/json`. Verified: `Accept: */*` → `200
+    application/vnd.oai.openapi`; `Accept: application/json` → `200
+    application/json`; `?format=json` → `200 application/vnd.oai.openapi+json`.
+  * **`GET /api/v1/docs/`** (§9.15) — a human-facing **documentation** endpoint,
+    not an API resource. `SpectacularSwaggerView` overrides the global renderers
+    with `TemplateHTMLRenderer` and serves `text/html`. Verified:
+    `Accept: */*` → `200 text/html; charset=utf-8`.
+* The `406 Unsupported Accept` rule therefore describes API resource endpoints.
+  Schema/docs endpoints negotiate against **their own** renderer sets and return
+  `406` only when the request accepts none of *those* media types (verified:
+  `GET /api/v1/schema/` with `Accept: text/csv` → `406`).
 * Parsers: DRF defaults (JSON, form, multipart).
 * Non-`/api/v1/` routes that also exist on the deployment: `/admin/` (Django
   admin, not part of this contract) and, in `DEBUG` only, `/media/<path>`.
@@ -696,10 +717,40 @@ the order total is used. `201` → `PaymentSerializer` (adds `is_terminal`,
 `is_paid`, `is_refundable`, `refund_amount`, `external_id`, `order`, `user`,
 `paid_at`, `cancelled_at`, `refunded_at`, `note`, `refund_reason`, `metadata`,
 `events[]`, `updated_at`). `404` unknown order.
-⚠️ **GAP — IDOR:** `Order.objects.get(pk=data['order_id'])` is **not scoped to
-the caller**; the ownership decision is delegated to `PaymentService`. This is
-the only place where an order is fetched by raw PK without an inline owner
-filter. 🔁 **FOLLOW-UP** (see §13, follow-up F-3).
+
+✅ **CURRENT — ownership is enforced, no IDOR.** The view resolves the order with
+`Order.objects.get(pk=data['order_id'])` (no inline owner filter), but it then
+passes `user=request.user` into `PaymentService.create_payment()`, whose **first
+action** is the ownership check:
+
+```python
+if order.user_id != user.pk:
+    raise NotFound('Заказ не найден.')
+```
+
+Paying for another user's order is therefore impossible, and the failure mode is
+`404 {"detail": "Заказ не найден."}` — identical to the "order does not exist"
+response, so the endpoint conforms to the project-wide 404-not-403 policy (§10)
+and leaks no order existence. Ownership enforcement simply lives in the service
+layer rather than the view layer.
+
+This is covered by tests at both layers:
+`apps/payments/tests/test_api.py::…::test_create_payment_other_users_order`
+asserts `404` for another user's `order_id`, and
+`apps/payments/tests/test_services.py::…::test_create_payment_wrong_user`
+asserts `NotFound` from the service.
+
+Additional server-side guards applied by the same service call, in order:
+order must be in status `PENDING` (else `400`); `amount` within
+`MIN_PAYMENT_AMOUNT`…`MAX_PAYMENT_AMOUNT` (else `400`); **`amount` must equal
+`order.total`** (else `400` — prevents underpayment); no existing succeeded
+payment for the order (else `400 {"detail": "Заказ уже оплачен."}`).
+
+⚠️ **GAP (style, not security):** the ownership check is not visible at the view
+boundary, unlike every other owned-resource endpoint (§10). A future refactor
+that changed or bypassed the service call would silently remove the protection.
+This is a **defence-in-depth/readability** observation only — there is no
+exploitable path today, so no follow-up issue is attached.
 **42.** See §11.
 **43.** `200` → `PaymentSerializer` with the full event history. Non-owner →
 `404 {"detail": "Платёж не найден."}`.
@@ -928,11 +979,27 @@ from the release ⚠️ **GAP**. Only `GET` is allowed (`405` otherwise).
 
 ### 9.15 Schema & docs (drf-spectacular)
 
+These two routes are **not API resource endpoints**. They are the schema and
+documentation surface, and each overrides the global JSON-only renderer
+configuration with its own renderer set (§2). They are therefore explicitly
+exempt from the JSON-only and `406` rules that govern §9.1–§9.14.
+
 **83. `GET /api/v1/schema/`** — Public. `SpectacularAPIView`. Returns the
-OpenAPI 3 document (YAML by default; `?format=json` for JSON).
-`SERVE_INCLUDE_SCHEMA = False`, so the schema endpoint does not document itself.
+OpenAPI 3 document. Renderers (overriding the global default):
+`OpenApiYamlRenderer` → `application/vnd.oai.openapi` (**default**, YAML),
+`OpenApiYamlRenderer2` → `application/yaml`,
+`OpenApiJsonRenderer` → `application/vnd.oai.openapi+json`,
+`OpenApiJsonRenderer2` → `application/json`.
+Format selection: content negotiation on `Accept`, or the `?format=json` /
+`?format=yaml` query parameter. `SERVE_INCLUDE_SCHEMA = False`, so the schema
+endpoint does not document itself. An `Accept` matching none of the four schema
+media types → `406`.
+
 **84. `GET /api/v1/docs/`** — Public. `SpectacularSwaggerView` — Swagger UI
-bound to `url_name="schema"`. Serves HTML.
+bound to `url_name="schema"`. Renderer: `TemplateHTMLRenderer` →
+**`text/html`** (overriding the global JSON-only default). This endpoint returns
+an HTML page by design and never JSON.
+
 Both are unauthenticated in every environment, including production
 ⚠️ **GAP / ❓ DECISION REQUIRED (API-02).**
 
@@ -972,9 +1039,13 @@ payments and shipments (they see everything).
 * Catalog product create/update by a non-staff user → `403` with a custom body.
 * Any `IsAdminUser` endpoint hit by an authenticated non-staff user → `403`.
 
-⚠️ **GAP:** `POST /api/v1/payments/` fetches the target order by raw PK with no
-inline owner scoping (§9.7 #41) — the only place where the pattern is not applied
-at the view boundary. 🔁 **FOLLOW-UP [F-3 (#68)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/68).**
+✅ **CURRENT — where the check lives varies, but the policy holds everywhere.**
+`POST /api/v1/payments/` is the one endpoint that enforces ownership in the
+**service** rather than in the view: it fetches the order by raw PK, then
+`PaymentService.create_payment()` raises `NotFound` when
+`order.user_id != user.pk`. The observable contract is the same `404` as
+everywhere else (§9.7 #41). No IDOR exists here; the difference is structural
+only, and no follow-up issue is attached.
 
 ⚠️ **GAP:** `GET /api/v1/reviews/?user_id=<other>` silently rewrites the filter
 to the caller's own id instead of returning `403`/`404`/`400` — a third,
@@ -1098,6 +1169,17 @@ The table below is the complete list of material gaps found by API-01.
 to a dedicated GitHub issue created by API-01, because that item falls outside
 the API-02…API-07 scope statements.
 
+> **Withdrawn during review — G-17 (`POST /api/v1/payments/` IDOR).** An earlier
+> revision of this document classified that endpoint as an IDOR gap on the basis
+> of the view code alone. Re-verification of the full chain
+> (view → serializer → `PaymentService.create_payment` → tests) showed that the
+> service performs the ownership check (`order.user_id != user.pk` → `NotFound`)
+> and that both API- and service-level tests assert it. **The gap and its
+> follow-up issue reference were removed**; the factual behaviour is documented
+> in §9.7 #41 and §10. Issue #68 was filed before this re-verification and is
+> now obsolete — it should be closed as "not a defect" by the Owner. Follow-up
+> numbering (F-1…F-12) is unchanged so that existing issue links stay valid.
+
 | # | Gap | Where | Owner |
 |---|---|---|---|
 | G-1 | Three different collection shapes (DRF envelope / bespoke reviews envelope / bare array) and 11 unbounded non-paginated collections | §6 | **API-05** |
@@ -1116,7 +1198,6 @@ the API-02…API-07 scope statements.
 | G-14 | Reviews list query parameters are hand-parsed; `ordering` and `product_uuid` fail silently instead of `400` | §9.8 | **API-05** (with [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)) |
 | G-15 | `?ordering=` invalid value silently falls back on catalog listing; `is_featured`/`status` query params are inert | §9.2 | **API-05** |
 | G-16 | `GET /reviews/?user_id=<other>` silently rewrites to the caller's id | §9.8, §10 | **[F-2 (#67)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/67)** |
-| G-17 | `POST /payments/` resolves the order by raw PK without inline owner scoping | §9.7, §10 | **[F-3 (#68)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/68)** |
 | G-18 | Public `/shipping/track/{tracking}/` is enumerable via sequential `SHP-` codes | §9.10 | **[F-4 (#69)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/69)** |
 | G-19 | `GET /shipping/methods/` requires authentication although it is reference data (blocks guest checkout) | §9.10 | **[F-5 (#70)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/70)** |
 | G-20 | No `Idempotency-Key` support; `POST /orders/` and `POST /payments/` are duplicable on retry | §11.2 | **API-07** |
@@ -1162,7 +1243,7 @@ API v1 **cannot be frozen** until the following are closed:
 | **API-05 — Collection/pagination contract** | One pagination envelope; `page_size` as a first-class parameter; paginate the 11 unbounded collections; unify notification representations; validate list query parameters. Closes G-1, G-2, G-3, G-14, G-15, G-24. |
 | **API-06 — API integration/contract tests** | Executable tests asserting every claim in §9 (status codes, shapes, ownership `404`s, pagination envelopes, webhook signature handling), so the contract cannot silently drift. |
 | **API-07 — End-to-end business scenarios** | Idempotency keys for order and payment creation; the full guest→cart→order→payment→shipment→review journey as a contract-level scenario. Closes G-20. |
-| **New follow-ups [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)–[#77](https://github.com/Kvasha62/Amazone_Clone_Production/issues/77)** | The defect- and policy-level items in §13 that are out of scope for API-02…API-07 and each need their own issue. |
+| **New follow-ups [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)–[#77](https://github.com/Kvasha62/Amazone_Clone_Production/issues/77)**, excluding the withdrawn [#68](https://github.com/Kvasha62/Amazone_Clone_Production/issues/68) | The defect- and policy-level items in §13 that are out of scope for API-02…API-07 and each need their own issue. |
 | **Final Backend/API Freeze Audit** | Re-run this inventory against the routing tree and confirm zero undocumented public endpoints. |
 
 Once all of the above are closed and this document has been regenerated against
@@ -1185,3 +1266,19 @@ client-visible change requires `/api/v2/` or an explicit, versioned deprecation.
 * `git diff --check` → clean.
 * This change is documentation-only: no Python file, route, serializer,
   permission or migration was modified.
+
+**Review corrections (PR #78):**
+
+* **Renderer negotiation** was re-verified by issuing real requests through the
+  Django test client rather than reading settings: API resource endpoints are
+  JSON-only and return `406` on an unsatisfiable `Accept`, while
+  `SpectacularAPIView` and `SpectacularSwaggerView` override
+  `DEFAULT_RENDERER_CLASSES` with their own renderer sets (OpenAPI schema media
+  types and `text/html` respectively). §2 and §9.15 were corrected accordingly;
+  the previous blanket "JSON only / `406`" statement was contradictory.
+* **`POST /api/v1/payments/` ownership** was re-verified across the whole chain
+  (view → `CreatePaymentInputSerializer` → `PaymentService.create_payment` →
+  `apps/payments/tests/test_api.py` and `test_services.py`). The service
+  enforces `order.user_id != user.pk → NotFound`, so the earlier IDOR
+  classification was **incorrect and has been withdrawn** (see the note in §13).
+  No runtime code was changed to reach either conclusion.
