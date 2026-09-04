@@ -468,7 +468,7 @@ drift between the two list endpoints is closed.
 | Payment | `payment_number` | `<str>`, format `PAY-` + zero-padded sequence (e.g. `PAY-000001`) | ⚠️ Stored in the model field literally named `order_number`; the URL kwarg is `payment_number`. Confusing but client-invisible. |
 | Payment (external) | `external_id` | provider string, unique | Webhook correlation key. |
 | Shipment | `pk` | `<int>` PK | ⚠️ **GAP** — the only order-adjacent resource still exposing a raw PK. |
-| Shipment tracking | `tracking` | `<str>` — external carrier number **or** internal `SHP-00000001` | Public lookup matches either field. |
+| Shipment tracking | `tracking` | `<str>` — external carrier `tracking_number` only | Public lookup matches **only** the external carrier `tracking_number`. The internal `SHP-*` (`internal_tracking`) code is an internal identifier and is **not** accepted as a public search key. |
 | Review | `review_id` | `<int>` PK | |
 | Notification | `pk` | `<int>` PK | |
 | Wishlist item | `item_id` | `<int>` PK | |
@@ -1061,14 +1061,17 @@ enforced only by the service FSM ⚠️ **GAP**. Illegal transition → `400`.
 Idempotent (absolute set). Note this is a `POST` that sets a single field,
 whereas #62 uses `PATCH` ⚠️ **GAP (method semantics)**.
 **64.** **Public** (`permission_classes = ()` — no authentication at all).
-`tracking` matches either the carrier `tracking_number` **or** the internal
-`SHP-XXXXXXXX` code. `200` → `ShipmentTrackingSerializer` (`internal_tracking`,
-`tracking_number`, `status`, `status_display`, `method_name`,
-`estimated_days_display`, `shipped_at`, `created_at`) — deliberately minimal, no
-customer or address data. `404` if not found.
-⚠️ **GAP:** internal tracking codes are **sequential and guessable**, so this
-public endpoint permits enumeration of shipment status. It is also exempt from
-per-user throttling (anonymous rate only). ❓ **DECISION REQUIRED.**
+`tracking` matches **only** the carrier `tracking_number`. The internal
+`SHP-XXXXXXXX` code (`internal_tracking`) is an internal identifier and is
+**not** accepted as a public search key. `200` → `ShipmentTrackingSerializer`
+(`internal_tracking`, `tracking_number`, `status`, `status_display`,
+`method_name`, `estimated_days_display`, `shipped_at`, `created_at`) —
+deliberately minimal, no customer or address data. `404` if not found.
+✅ **CLOSED (Issue #69 / F-4):** the public endpoint no longer resolves by the
+sequential, guessable `SHP-*` code. A valid existing `internal_tracking` and a
+fully unknown tracking both return the canonical `404 not_found` with an
+identical envelope, so shipment existence is not leaked. The endpoint remains
+exempt from per-user throttling (anonymous rate only).
 
 ### 9.11 Wishlist (`apps.wishlist`) — all Auth
 
@@ -1387,7 +1390,7 @@ the API-02…API-07 scope statements.
 | G-14 | Reviews list query parameters are hand-parsed; `ordering` and `product_uuid` fail silently instead of `400` | §9.8 | **API-05** (with [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)) |
 | G-15 | `?ordering=` invalid value silently falls back on catalog listing; `is_featured`/`status` query params are inert | §9.2 | **API-05** |
 | G-16 | `GET /reviews/?user_id=<other>` silently rewrites to the caller's id | §9.8, §10 | **Closed by [#67](https://github.com/Kvasha62/Amazone_Clone_Production/issues/67)** — non-staff callers now receive canonical `404` / `not_found` |
-| G-18 | Public `/shipping/track/{tracking}/` is enumerable via sequential `SHP-` codes | §9.10 | **[F-4 (#69)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/69)** |
+| G-18 | Public `/shipping/track/{tracking}/` is enumerable via sequential `SHP-` codes | §9.10 | **Closed by [F-4 (#69)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/69)** — public lookup now uses `tracking_number` only; `internal_tracking` is not a public key |
 | G-19 | `GET /shipping/methods/` requires authentication although it is reference data (blocks guest checkout) | §9.10 | **[F-5 (#70)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/70)** |
 | G-20 | No `Idempotency-Key` support; `POST /orders/` and `POST /payments/` are duplicable on retry | §11.2 | **API-07** |
 | G-21 | Webhook signature has no timestamp/nonce → indefinite replay window | §11.3 | **[F-6 (#71)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/71)** |

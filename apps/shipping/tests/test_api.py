@@ -241,7 +241,14 @@ class ShipmentTrackingAPITests(TestCase):
 
 
 class ShipmentTrackingByCodeAPITests(TestCase):
-    """Тесты GET /api/v1/shipping/track/{tracking}/."""
+    """Тесты GET /api/v1/shipping/track/{tracking}/.
+
+    Issue #69 (API-01 / F-4): публичный endpoint отслеживания резолвит
+    shipment ТОЛЬКО по внешнему ``Shipment.tracking_number``. Внутренний
+    ``internal_tracking`` (``SHP-*``) не является публичным ключом поиска:
+    передача существующего ``internal_tracking`` и полностью неизвестного
+    номера неразличимы с точки зрения API-контракта (404 + not_found).
+    """
 
     def setUp(self):
         self.client = APIClient()
@@ -255,21 +262,60 @@ class ShipmentTrackingByCodeAPITests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['tracking_number'], 'EXT-12345')
+        # Возвращается shipment tracking information.
+        self.assertEqual(response.data['status'], self.shipment.status)
+        self.assertEqual(response.data['internal_tracking'], self.shipment.internal_tracking)
 
-    def test_track_by_internal(self):
-        """Отслеживание по внутреннему треку."""
+    def test_track_by_internal_not_accepted(self):
+        """Внутренний internal_tracking не принимается публичным endpoint."""
         url = reverse(
             'shipping:track-by-code',
             kwargs={'tracking': self.shipment.internal_tracking},
         )
         response = self.client.get(url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error']['code'], 'not_found')
 
-    def test_track_not_found(self):
-        """NotFound для несуществующего трека."""
+    def test_track_unknown(self):
+        """Полностью неизвестный трек → 404 + canonical not_found."""
         url = reverse('shipping:track-by-code', kwargs={'tracking': 'NOPE'})
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error']['code'], 'not_found')
+
+    def test_track_internal_and_unknown_indistinguishable(self):
+        """Ответы для существующего internal_tracking и неизвестного трека
+        неразличимы с точки зрения API-контракта: одинаковый HTTP status и
+        одинаковый error.code, не раскрывается факт существования shipment."""
+        internal_url = reverse(
+            'shipping:track-by-code',
+            kwargs={'tracking': self.shipment.internal_tracking},
+        )
+        unknown_url = reverse(
+            'shipping:track-by-code',
+            kwargs={'tracking': 'NOPE'},
+        )
+        internal_resp = self.client.get(internal_url)
+        unknown_resp = self.client.get(unknown_url)
+
+        self.assertEqual(internal_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(unknown_resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(
+            internal_resp.data['error']['code'],
+            unknown_resp.data['error']['code'],
+        )
+        # Ни один из них не раскрывает существование shipment.
+        self.assertEqual(internal_resp.data['error']['code'], 'not_found')
+        self.assertEqual(unknown_resp.data['error']['code'], 'not_found')
+        self.assertEqual(len(internal_resp.data['error']['details']), 0)
+        self.assertEqual(len(unknown_resp.data['error']['details']), 0)
+
+    def test_track_not_found(self):
+        """404 для несуществующего трека."""
+        url = reverse('shipping:track-by-code', kwargs={'tracking': 'NOPE'})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error']['code'], 'not_found')
 
     def test_track_no_auth_required(self):
         """Публичный endpoint — авторизация не нужна."""
