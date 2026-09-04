@@ -17,7 +17,7 @@ from apps.inventory.tests.factories import create_test_movement, create_test_sto
 from apps.notifications.tests.factories import create_test_notification
 from apps.orders.tests.factories import create_test_order, create_test_user
 from apps.payments.tests.factories import create_test_payment
-from apps.pricing.services.pricing_service import PricingService
+from apps.pricing.models import PriceHistory
 from apps.reviews.tests.factories import create_test_review
 from apps.shipping.tests.factories import create_test_method, create_test_shipment
 
@@ -80,16 +80,22 @@ class PaginationContractTests(CatalogTestCase):
         for _ in range(3):
             create_test_movement(cls.stock)
 
-        # Price history (set_price writes a PriceHistory row).
-        PricingService.set_price(
-            cls.variant_128, Decimal('100.00'), changed_by=cls.staff,
-        )
-        PricingService.set_price(
-            cls.variant_128, Decimal('90.00'), changed_by=cls.staff,
-        )
-        PricingService.set_price(
-            cls.variant_128, Decimal('80.00'), changed_by=cls.staff,
-        )
+        # Price history (direct rows; the pricing service is under test
+        # elsewhere and uses row locks that are unnecessary in a contract fixture).
+        for old_price, new_price in (
+            (Decimal('100.00'), Decimal('90.00')),
+            (Decimal('90.00'), Decimal('80.00')),
+            (Decimal('80.00'), Decimal('70.00')),
+        ):
+            PriceHistory.objects.create(
+                variant=cls.variant_128,
+                old_price=old_price,
+                new_price=new_price,
+                old_sale_price=None,
+                new_sale_price=None,
+                changed_by=cls.staff,
+                reason='contract fixture',
+            )
 
         # Coupons.
         for code in ('API05A', 'API05B', 'API05C'):
