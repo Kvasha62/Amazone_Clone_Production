@@ -93,6 +93,15 @@ app.conf.beat_schedule = {
         'schedule': 60 * 60,  # каждый час
         'args': (),
     },
+
+    # Issue #71 / API-01 F-6: очистка использованных payment-webhook
+    # nonce. Retention nonce ≈ 6 минут (окно свежести 5 минут + запас),
+    # поэтому запуск каждые 15 минут держит таблицу nonce ограниченной.
+    'cleanup-payment-webhook-nonces': {
+        'task': 'apps.payments.tasks.cleanup_webhook_nonces',
+        'schedule': 60 * 15,  # каждые 15 минут
+        'args': (),
+    },
 }
 
 if __name__ == '__main__':

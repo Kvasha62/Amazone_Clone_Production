@@ -24,6 +24,10 @@ from apps.core.api_errors import CODE_NOT_FOUND, CODE_VALIDATION
 from apps.orders.tests.factories import create_test_order, create_test_user
 from apps.payments.models import Payment
 from apps.payments.tests.factories import create_test_payment
+from apps.payments.tests.webhook_helpers import (
+    WEBHOOK_SECRET,
+    post_signed_webhook,
+)
 
 
 class PaymentListAPITests(TestCase):
@@ -385,7 +389,11 @@ class PaymentCancelAPITests(TestCase):
 
 
 class PaymentWebhookAPITests(TestCase):
-    """Тесты POST /api/v1/payments/webhook/ — базовые (без HMAC)."""
+    """Тесты POST /api/v1/payments/webhook/ — базовые.
+
+    Подпись/заголовки — единый помощник webhook_helpers
+    (timestamp + nonce + HMAC по канону, Issue #71).
+    """
 
     def setUp(self):
         self.user = create_test_user()
@@ -396,58 +404,40 @@ class PaymentWebhookAPITests(TestCase):
         self.client = APIClient()
         self.url = reverse('payments:payment-webhook')
 
-    @override_settings(PAYMENT_WEBHOOK_SECRET='test-secret-key-32bytes!!!!')
+    @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
     def test_webhook_with_valid_signature(self):
-        """Webhook с валидной HMAC подписей → 200."""
-        import hashlib, hmac, json
+        """Webhook с валидной подписью (ts + nonce + HMAC) → 200."""
         data = {
             'external_id': self.payment.external_id,
             'event_type': 'payment.succeeded',
             'status': 'succeeded',
         }
-        body = json.dumps(data).encode('utf-8')
-        sig = hmac.new(b'test-secret-key-32bytes!!!!', body, hashlib.sha256).hexdigest()
-        resp = self.client.post(
-            self.url, data=body, content_type='application/json',
-            HTTP_X_WEBHOOK_SIGNATURE=sig,
-        )
+        resp = post_signed_webhook(self.client, self.url, data)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['status'], 'succeeded')
 
-    @override_settings(PAYMENT_WEBHOOK_SECRET='test-secret-key-32bytes!!!!')
+    @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
     def test_webhook_unknown_payment(self):
         """Webhook с неизвестным external_id → 200 + сообщение."""
-        import hashlib, hmac, json
         data = {
             'external_id': 'unknown_ext_id_999',
             'event_type': 'payment.succeeded',
             'status': 'succeeded',
         }
-        body = json.dumps(data).encode('utf-8')
-        sig = hmac.new(b'test-secret-key-32bytes!!!!', body, hashlib.sha256).hexdigest()
-        resp = self.client.post(
-            self.url, data=body, content_type='application/json',
-            HTTP_X_WEBHOOK_SIGNATURE=sig,
-        )
+        resp = post_signed_webhook(self.client, self.url, data)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('не найден', resp.data['detail'])
 
-    @override_settings(PAYMENT_WEBHOOK_SECRET='test-secret-key-32bytes!!!!')
+    @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
     def test_webhook_failed_payment(self):
         """Webhook status=failed → FAILED."""
-        import hashlib, hmac, json
         data = {
             'external_id': self.payment.external_id,
             'event_type': 'payment.failed',
             'status': 'failed',
             'payload': {'error': 'insufficient_funds'},
         }
-        body = json.dumps(data).encode('utf-8')
-        sig = hmac.new(b'test-secret-key-32bytes!!!!', body, hashlib.sha256).hexdigest()
-        resp = self.client.post(
-            self.url, data=body, content_type='application/json',
-            HTTP_X_WEBHOOK_SIGNATURE=sig,
-        )
+        resp = post_signed_webhook(self.client, self.url, data)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['status'], 'failed')
 

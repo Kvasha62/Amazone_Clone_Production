@@ -10,5 +10,6 @@
 
 from apps.payments.models.payment import Payment
 from apps.payments.models.payment_event import PaymentEvent
+from apps.payments.models.webhook_nonce import PaymentWebhookNonce
 
-__all__ = ['Payment', 'PaymentEvent']
+__all__ = ['Payment', 'PaymentEvent', 'PaymentWebhookNonce']

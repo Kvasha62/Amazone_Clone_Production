@@ -15,9 +15,6 @@
 #   • reconcile_succeeded_payment — точка восстановления для команды.
 # ────────────────────────────────────────────────────────────────────────
 
-import hashlib
-import hmac
-import json
 from decimal import Decimal
 from unittest import mock
 
@@ -43,16 +40,10 @@ from apps.payments.exceptions import OrderConfirmationError
 from apps.payments.models import PaymentEvent
 from apps.payments.services.payment_service import PaymentService
 from apps.payments.tests.factories import create_test_payment
-
-WEBHOOK_SECRET = 'test-webhook-secret-key-32bytes!!'
-
-
-def _sign_body(body: bytes, secret: str = WEBHOOK_SECRET) -> str:
-    return hmac.new(
-        secret.encode('utf-8'),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+from apps.payments.tests.webhook_helpers import (
+    WEBHOOK_SECRET,
+    post_signed_webhook,
+)
 
 
 def _make_order_with_item(quantity: int = 5, stock_quantity: int = 100):
@@ -240,13 +231,8 @@ class WebhookOrderConfirmationRecoveryTests(TestCase):
             'event_type': 'payment.succeeded',
             'status': status_value,
         }
-        body = json.dumps(data).encode('utf-8')
-        return self.client.post(
-            self.url,
-            data=body,
-            content_type='application/json',
-            HTTP_X_WEBHOOK_SIGNATURE=_sign_body(body),
-        )
+        # Единый помощник: timestamp + nonce + HMAC по канону (Issue #71).
+        return post_signed_webhook(self.client, self.url, data)
 
     @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
     def test_insufficient_stock_returns_502_with_durable_event(self):

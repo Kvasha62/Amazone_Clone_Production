@@ -282,7 +282,7 @@ internals.
 | `400` | `validation_error` | Serializer / form / request validation; domain `ValidationError` (including business-rule conflicts). Malformed JSON → `parse_error`. |
 | `401` | `not_authenticated` | Missing credentials on an `IsAuthenticated` endpoint. |
 | `401` | `authentication_failed` | Invalid/expired/malformed JWT, bad login, inactive account, blacklisted/unowned refresh (API-03 statuses preserved). |
-| `403` | `permission_denied` | Authenticated caller lacks permission (staff checks, `IsAdminUser`, webhook HMAC failure). |
+| `403` | `permission_denied` | Authenticated caller lacks permission (staff checks, `IsAdminUser`), **and** payment-webhook transport-auth failure (missing/malformed timestamp/nonce/signature, stale timestamp, bad signature, reused nonce) — one neutral envelope for all (§11.3). |
 | `404` | `not_found` | Missing resource **and** intentional ownership/IDOR hiding (§10). Status remains `404`, never `403`. |
 | `405` | `method_not_allowed` | Matched route, unsupported method (e.g. `PUT /api/v1/cart/`). |
 | `406` | `not_acceptable` | Unsatisfiable `Accept` on a JSON-only resource endpoint. |
@@ -326,8 +326,8 @@ internal text. They are not converted into `400`.
   endpoints, not API resources.
 * **Payment webhook success-path `200`** payloads (`PaymentSerializer`, or
   `{detail: "Платёж не найден, webhook logged."}` / completed-order notice)
-  are **not** errors. Webhook **failures** (`403` HMAC, `400` validation,
-  `502` retry) use the envelope.
+  are **not** errors. Webhook **failures** (`403` transport-auth/HMAC,
+  `400` validation, `502` retry) use the envelope (§11.3).
 
 ---
 
@@ -884,7 +884,7 @@ supported; confirm at freeze.
 |---|---|---|---|
 | 41 | GET | `/api/v1/payments/` | Auth |
 | 42 | POST | `/api/v1/payments/` | Auth |
-| 43 | POST | `/api/v1/payments/webhook/` | Public + HMAC |
+| 43 | POST | `/api/v1/payments/webhook/` | Public + HMAC + timestamp + nonce (§11.3) |
 | 44 | GET | `/api/v1/payments/{payment_number}/` | Auth (owner or staff) |
 | 45 | POST | `/api/v1/payments/{payment_number}/refund/` | Staff |
 | 46 | POST | `/api/v1/payments/{payment_number}/cancel/` | Auth (owner or staff) |
@@ -1280,16 +1280,63 @@ timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
 ### 11.3 Payment webhook — `POST /api/v1/payments/webhook/` ✅ **CURRENT**
 
 * **Authentication:** none in the DRF sense (`authentication_classes = []`,
-  `permission_classes = (AllowAny,)`). Security is provided by an
-  **HMAC-SHA256** signature over the **raw request body**, presented in the
-  `X-Webhook-Signature` header as lowercase hex, compared with
-  `hmac.compare_digest` (timing-safe) against `settings.PAYMENT_WEBHOOK_SECRET`.
-* **Fail-closed:** if `PAYMENT_WEBHOOK_SECRET` is unset/empty, or the header is
-  missing, or the digest does not match → `403` canonical `permission_denied`.
-  Neither the secret nor the signature is ever logged.
+  `permission_classes = (AllowAny,)`). Security is provided by a transport
+  layer — **HMAC-SHA256** signature **plus a signed timestamp and a
+  one-time nonce** (replay protection, Issue #71 / API-01 F-6) — all verified
+  before any business processing. The secret is
+  `settings.PAYMENT_WEBHOOK_SECRET` (env var).
+
+  **Transport headers (all three are required):**
+
+  | Header | Value | Format |
+  |---|---|---|
+  | `X-Webhook-Timestamp` | Unix epoch seconds, **UTC** | ASCII decimal integer, no leading zeros (except bare `0`), ≤ 20 digits |
+  | `X-Webhook-Nonce` | Unpredictable one-time identifier | `[A-Za-z0-9_-]`, 1–128 chars |
+  | `X-Webhook-Signature` | Lowercase hex `HMAC-SHA256` digest | exactly 64 chars `[0-9a-f]` |
+
+* **Exact signed payload.** The signature is **not** computed over the body
+  alone. It is computed over the canonical concatenation:
+
+  ```
+  signed_payload = timestamp || nonce || raw_body
+  X-Webhook-Signature = hex( HMAC-SHA256( secret, signed_payload ) )
+  ```
+
+  where `timestamp` and `nonce` are the **exact ASCII header strings**
+  (i.e. `timestamp.encode('ascii')` and `nonce.encode('ascii')`) and
+  `raw_body` is the **raw request body bytes** — no JSON re-serialization,
+  normalization, or whitespace changes. `request.data` / serialized JSON is
+  **never** signed. This is implemented once in
+  `apps/payments/services/webhook_security.compute_webhook_signature`; the test
+  helper imports that same function so the signed payload is byte-identical
+  between tests and production.
+
+* **Freshness window:** `abs(server_now - webhook_timestamp) <= 300` seconds
+  (±5 minutes). Both too-old and too-future timestamps are rejected.
+* **One-time nonce (replay protection):** each accepted nonce is persisted in
+  `PaymentWebhookNonce` (`nonce` UNIQUE) via an atomic, race-safe INSERT inside
+  its **own durable transaction**. A repeated nonce is rejected even if it is
+  still fresh. The claim is **not** rolled back with the business transaction:
+  if business processing fails, the nonce stays consumed and a retry of the
+  same webhook is rejected (a legitimate redelivery uses a new nonce).
+  Nonces are cleaned up by `cleanup_webhook_nonces` (management command, run
+  every 15 min by Celery Beat) once older than
+  `WEBHOOK_NONCE_RETENTION_SECONDS` (= tolerance + 60 s), i.e. guaranteed
+  no longer replayable.
+* **Fail-closed:** if `PAYMENT_WEBHOOK_SECRET` is unset/empty, or any of the
+  three headers is missing, or a header is malformed, or the timestamp is
+  outside the freshness window, or the digest does not match, or the nonce was
+  already used → `403` canonical `permission_denied`. The secret and signature
+  are never logged.
+* **Neutral security errors.** Every transport failure produces the **same**
+  `403` / `permission_denied` envelope (identical `error.code`, `message`,
+  `details`). The rejection does **not** distinguish a stale timestamp from a
+  reused nonce from a bad signature, and does not reveal the secret, the
+  expected/received signature, the nonce, or any traceback.
 * **Body** (`HandleWebhookInputSerializer`): `external_id` (str, required),
   `event_type` (str, required), `status` (choice, required), `payload`
-  (JSON object, optional). Invalid → `400`.
+  (JSON object, optional). Invalid → `400` (only reached after transport
+  verification succeeds).
 * **Success:** `200` with the full `PaymentSerializer`.
 * **Unknown `external_id`:** `200 {"detail": "Платёж не найден, webhook
   logged."}` — deliberately `200` so the provider does not retry forever.
@@ -1298,13 +1345,18 @@ timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
   платёж отклонён."}`.
 * **Transient order-confirmation failure:** `502` canonical `bad_gateway` —
   an explicit *retry me* signal to the provider. This is the only `502` in the API.
-* **Idempotency/replay:** `Payment.external_id` carries a **unique constraint**
-  (migration `payments/0004_payment_external_id_unique`), and repeated webhooks
-  for the same `external_id` are absorbed by `PaymentService.handle_webhook`
-  with an appended `PaymentEvent` audit trail. There is no timestamp/nonce in
-  the signed payload, so a captured request body remains replayable indefinitely.
-  ❓ **DECISION REQUIRED:** add a signed timestamp + freshness window before
-  freeze (see ADR-004).
+* **Two independent protection levels (do not conflate):**
+  * **Transport replay protection** = `X-Webhook-Timestamp` + `X-Webhook-Nonce`
+    + HMAC over the signed payload. Prevents redelivering the *same signed
+    message*.
+  * **Business idempotency** = `Payment.external_id` (unique constraint,
+    migration `payments/0004_payment_external_id_unique`). Repeated webhooks
+    for the same `external_id` (legitimate at-least-once delivery, each with a
+    fresh nonce) are absorbed by `PaymentService.handle_webhook` with an
+    appended `PaymentEvent` audit trail.
+
+    A provider that genuinely redelivers a payment event must send a **new
+    nonce**; the business layer then deduplicates on `external_id`.
 * Design rationale is recorded in `docs/adr/ADR-004-secure-idempotent-payment-webhooks.md`.
 
 ---
@@ -1393,7 +1445,7 @@ the API-02…API-07 scope statements.
 | G-18 | Public `/shipping/track/{tracking}/` is enumerable via sequential `SHP-` codes | §9.10 | **Closed by [F-4 (#69)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/69)** — public lookup now uses `tracking_number` only; `internal_tracking` is not a public key |
 | G-19 | `GET /shipping/methods/` requires authentication although it is reference data (blocks guest checkout) | §9.10 | **[F-5 (#70)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/70)** |
 | G-20 | No `Idempotency-Key` support; `POST /orders/` and `POST /payments/` are duplicable on retry | §11.2 | **API-07** |
-| G-21 | Webhook signature has no timestamp/nonce → indefinite replay window | §11.3 | **[F-6 (#71)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/71)** |
+| G-21 | Webhook signature has no timestamp/nonce → indefinite replay window | §11.3 | **Closed by [F-6 (#71)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/71)** — signed `X-Webhook-Timestamp` + one-time `X-Webhook-Nonce` + ±300 s freshness window, race-safe durable nonce claim |
 | G-22 | Side-effecting reads: `GET /catalog/products/{id}/` increments views; `GET /inventory/{variant_id}/` creates a Stock row | §9.2, §9.5 | **[F-7 (#72)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/72)** |
 | G-23 | Identifier drift: catalog `id` is a UUID; cross-context order references use the integer PK while order URLs use `order_number`; shipments expose a raw PK | §7 | **[F-8 (#73)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/73)** |
 | G-24 | Notification list vs unread list return different representations of the same resource | §9.12 | **API-05** |

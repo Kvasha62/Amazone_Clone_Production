@@ -7,6 +7,7 @@
 # 📖 https://docs.djangoproject.com/en/stable/topics/settings/
 # ────────────────────────────────────────────────────────────────────────
 
+import re
 from decimal import Decimal
 
 # ────────────────────────────────────────────────────────────────────────
@@ -151,3 +152,53 @@ PAYMENT_USER_THROTTLE_RATE = '30/min'
 
 # Имя провайдера по умолчанию (для тестов / mock).
 DEFAULT_PAYMENT_PROVIDER = 'mock'
+
+# ────────────────────────────────────────────────────────────────────────
+# PAYMENT WEBHOOK — REPLAY PROTECTION (Issue #71 / API-01 F-6)
+# ────────────────────────────────────────────────────────────────────────
+#
+# Транспортная защита webhook от replay-атак. HMAC-SHA256 теперь
+# вычисляется НЕ только по raw body, а по канонической сборке:
+#
+#     signed_payload = timestamp || nonce || raw_body
+#
+# где timestamp/nonce — точные ASCII-строки из заголовков,
+# raw_body — исходные байты request.body (без ре-сериализации).
+#
+# ДВА НЕЗАВИСИМЫХ УРОВНЯ ЗАЩИТЫ (не подменяют друг друга):
+#   • Transport-level: timestamp + nonce + HMAC — повторная доставка
+#     одного и того же подписанного запроса невозможна (freshness window
+#     + одноразовый nonce).
+#   • Business-level: уникальность Payment.external_id — повторное
+#     бизнес-событие того же платежа идемпотентно.
+
+# Имена HTTP-заголовков (контракт, см. docs/api/API_CONTRACT.md §11.3).
+WEBHOOK_TIMESTAMP_HEADER = 'X-Webhook-Timestamp'
+WEBHOOK_NONCE_HEADER = 'X-Webhook-Nonce'
+WEBHOOK_SIGNATURE_HEADER = 'X-Webhook-Signature'
+
+# Окно свежести timestamp: abs(servertime - webhook_timestamp) <= 300 с.
+# Запросы старше 5 минут (и «слишком будущие» на > 5 минут) отклоняются.
+WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300
+
+# Timestamp: Unix epoch, секунды, ASCII decimal integer (UTC).
+# Без leading zeros (кроме одиночной '0'), не длиннее 20 цифр
+# (защита от аномально длинных строк до int()).
+WEBHOOK_TIMESTAMP_PATTERN = re.compile(r'(?:0|[1-9][0-9]{0,19})\Z')
+
+# Nonce: непредсказуемый одноразовый идентификатор webhook.
+# ASCII, [A-Za-z0-9_-], 1..128 символов — разумный потолок,
+# произвольно огромные значения не принимаются.
+WEBHOOK_NONCE_MAX_LENGTH = 128
+WEBHOOK_NONCE_PATTERN = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
+
+# Signature: lowercase hex-дайджест HMAC-SHA256 (64 символа) —
+# ровно то, что выдаёт hmac...hexdigest().
+WEBHOOK_SIGNATURE_PATTERN = re.compile(r'[0-9a-f]{64}\Z')
+
+# Retention nonce в БД. Nonce с webhook_timestamp=ts может быть
+# повторно использован только пока (servertime - ts) <= tolerance,
+# то есть пока ts >= servertime - tolerance. Удаление разрешено при
+# ts < servertime - retention. retention = tolerance + 60 c запас —
+# nonce гарантированно уже не может пройти проверку свежести.
+WEBHOOK_NONCE_RETENTION_SECONDS = WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS + 60
