@@ -212,10 +212,15 @@ class ReviewListView(APIView):
 
         if ordering == 'helpful':
             # Apply the existing “most helpful” ordering in the database and
-            # keep deterministic ties for stable pages.
+            # keep deterministic ties for stable pages. The alias intentionally
+            # differs from the ``helpful_score`` property on ``Review``; Django
+            # would try to set that read-only property on each instance and
+            # raise ``AttributeError``.
             qs = ensure_deterministic_ordering(
-                qs.annotate(helpful_score=F('helpful_yes') - F('helpful_no')),
-                ['-helpful_score', '-created_at'],
+                qs.annotate(
+                    helpful_order_score=F('helpful_yes') - F('helpful_no'),
+                ),
+                ['-helpful_order_score', '-created_at'],
             )
         else:
             qs = ensure_deterministic_ordering(qs, [ordering])
