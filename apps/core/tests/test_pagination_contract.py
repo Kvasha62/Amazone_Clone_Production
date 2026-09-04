@@ -19,7 +19,7 @@ from apps.orders.tests.factories import create_test_order, create_test_user
 from apps.payments.tests.factories import create_test_payment
 from apps.pricing.services.pricing_service import PricingService
 from apps.reviews.tests.factories import create_test_review
-from apps.shipping.tests.factories import create_test_shipment
+from apps.shipping.tests.factories import create_test_method, create_test_shipment
 
 CANONICAL_FIELDS = {
     'count',
@@ -95,9 +95,11 @@ class PaginationContractTests(CatalogTestCase):
         for code in ('API05A', 'API05B', 'API05C'):
             create_test_coupon(code=code)
 
-        # Shipments.
+        # Shipments (reuse one method so the helper does not create a
+        # duplicate default zone with the same unique zone_code).
+        cls.shipping_method = create_test_method()
         for order in cls.orders:
-            create_test_shipment(order)
+            create_test_shipment(order, method=cls.shipping_method)
 
         # Notifications.
         for index in range(3):
