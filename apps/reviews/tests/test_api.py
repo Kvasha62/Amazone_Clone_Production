@@ -15,6 +15,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from apps.core.api_errors import CODE_NOT_FOUND
 from apps.catalog.tests.factories import CatalogTestCase
 from apps.orders.tests.factories import create_test_user
 from apps.reviews.models import ReviewHelpfulVote
@@ -32,9 +33,9 @@ class ReviewListPublicTests(CatalogTestCase):
             self.user, self.product, rating=5,
             text='Отличный товар, очень доволен!',
         )
-        user2 = create_test_user()
+        self.other_user = create_test_user()
         self.r3 = create_test_review(
-            user2, self.product, rating=3,
+            self.other_user, self.product, rating=3,
             text='Нормальный товар за свои деньги.',
         )
 
@@ -108,6 +109,79 @@ class ReviewListPublicTests(CatalogTestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data['results']), 1)
         self.assertEqual(resp.data['count'], 2)
+        self.assertEqual(resp.data['page'], 1)
+        self.assertEqual(resp.data['page_size'], 1)
+        self.assertEqual(resp.data['total_pages'], 2)
+        self.assertIsNone(resp.data['previous'])
+        self.assertIsNotNone(resp.data['next'])
+
+    def test_list_by_own_user_id(self):
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.get(self.url, {'user_id': self.user.pk})
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(
+            [item['id'] for item in resp.data['results']],
+            [self.r5.pk],
+        )
+        self.assertTrue(
+            all(item['user_id'] == self.user.pk for item in resp.data['results'])
+        )
+
+    def test_list_by_other_user_id_returns_canonical_404(self):
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.get(self.url, {'user_id': self.other_user.pk})
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        error = resp.data['error']
+        self.assertEqual(set(error), {'code', 'message', 'details'})
+        self.assertEqual(error['code'], CODE_NOT_FOUND)
+        self.assertIsInstance(error['message'], str)
+        self.assertTrue(error['message'])
+        self.assertIsInstance(error['details'], list)
+        for detail in error['details']:
+            self.assertEqual(set(detail), {'field', 'code', 'message'})
+
+        # The request must not be rewritten to the caller's id, and the error
+        # must not disclose identifiers or implementation details. Ignore the
+        # optional outer request_id, which is an allowed API-04 correlation id.
+        error_text = str(error).lower()
+        self.assertNotIn(str(self.other_user.pk), error_text)
+        for internal_detail in ('traceback', 'valueerror', 'exception'):
+            self.assertNotIn(internal_detail, error_text)
+
+    def test_list_without_user_id_keeps_own_review_scope(self):
+        self.client.force_authenticate(self.user)
+
+        resp = self.client.get(self.url)
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertTrue(
+            all(item['user_id'] == self.user.pk for item in resp.data['results'])
+        )
+
+    def test_staff_can_filter_by_other_user_id(self):
+        staff = create_test_user(is_staff=True)
+        self.client.force_authenticate(staff)
+
+        resp = self.client.get(self.url, {'user_id': self.other_user.pk})
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(
+            [item['id'] for item in resp.data['results']],
+            [self.r3.pk],
+        )
+        self.assertTrue(
+            all(
+                item['user_id'] == self.other_user.pk
+                for item in resp.data['results']
+            )
+        )
 
     def test_anonymous_without_product_filter(self):
         resp = self.client.get(self.url)
