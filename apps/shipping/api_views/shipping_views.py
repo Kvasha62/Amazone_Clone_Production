@@ -22,6 +22,14 @@ from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
+
 from apps.orders.models import Order
 from apps.shipping.models import Shipment, ShippingMethod
 from apps.shipping.serializers import (
@@ -148,7 +156,8 @@ class ShippingCostView(APIView):
 @extend_schema_view(
     get=extend_schema(
         summary='Список отправлений пользователя',
-        responses={200: ShipmentListSerializer(many=True)},
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
     ),
 )
 class ShipmentListView(APIView):
@@ -164,15 +173,19 @@ class ShipmentListView(APIView):
         if request.user.is_staff:
             shipments = Shipment.objects.select_related(
                 'order', 'method',
-            ).order_by('-created_at')
+            )
         else:
             shipments = (
                 request.user.shipments
                 .select_related('order', 'method')
-                .order_by('-created_at')
             )
-        serializer = ShipmentListSerializer(shipments, many=True)
-        return Response(serializer.data)
+        # API-05: deterministic ordering with a stable pk tie-breaker.
+        shipments = ensure_deterministic_ordering(shipments, ['-created_at'])
+        page_items, meta = paginate_queryset(shipments, request)
+        serializer = ShipmentListSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
 
 @extend_schema_view(

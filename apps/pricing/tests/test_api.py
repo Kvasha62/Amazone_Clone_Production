@@ -98,7 +98,9 @@ class PriceHistoryAPITests(PriceAPITestCase):
             f'/api/v1/pricing/variants/{self.variant_a.pk}/history/',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data, [])
+        self.assertEqual(resp.data['count'], 0)
+        self.assertEqual(resp.data['results'], [])
+        self.assertEqual(resp.data['total_pages'], 0)
 
     def test_history_has_entries(self):
         from apps.pricing.services.pricing_service import PricingService
@@ -108,9 +110,10 @@ class PriceHistoryAPITests(PriceAPITestCase):
         resp = self.client.get(
             f'/api/v1/pricing/variants/{self.variant_a.pk}/history/',
         )
-        self.assertEqual(len(resp.data), 1)
-        self.assertEqual(resp.data[0]['old_price'], '100.00')
-        self.assertEqual(resp.data[0]['new_price'], '90.00')
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(len(resp.data['results']), 1)
+        self.assertEqual(resp.data['results'][0]['old_price'], '100.00')
+        self.assertEqual(resp.data['results'][0]['new_price'], '90.00')
 
 
 class BulkPriceAPITests(PriceAPITestCase):

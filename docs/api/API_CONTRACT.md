@@ -331,59 +331,119 @@ internal text. They are not converted into `400`.
 
 ---
 
-## 6. Pagination conventions and current exceptions
+## 6. Collection and pagination contract (API-05) ✅ **CURRENT / NORMATIVE**
 
-### 6.1 Configured default ✅ **CURRENT**
+API-05 defines **one** canonical representation for every paginated public
+collection endpoint. It supersedes the historical inconsistency documented by
+API-01 (three different collection shapes, an ignored `page_size`, and a
+bespoke reviews envelope).
 
-`REST_FRAMEWORK["DEFAULT_PAGINATION_CLASS"] = PageNumberPagination`,
-`PAGE_SIZE = 20`. **However**, every endpoint in this API is a plain `APIView`
-(no `ListAPIView`, no `ViewSet`), so the default pagination class is **never
-applied automatically**. Pagination only happens where a view opts in.
+### 6.1 Canonical paginated response
 
-### 6.2 Classification of every collection endpoint
+```json
+{
+  "count": 150,
+  "page": 2,
+  "page_size": 20,
+  "total_pages": 8,
+  "next": "/api/v1/catalog/products/?page=3&page_size=20",
+  "previous": "/api/v1/catalog/products/?page=1&page_size=20",
+  "results": []
+}
+```
 
-**A. Paginated — DRF `PageNumberPagination` shape**
+| Field | Type | Semantics |
+|---|---|---|
+| `count` | int | Total number of items in the *whole* queryset, not just the page. |
+| `page` | int | Requested 1-based page number, echoed verbatim after validation. |
+| `page_size` | int | Effective page size used for the response (never less than 1 or greater than 100). |
+| `total_pages` | int | `ceil(count / page_size)`, or `0` when `count == 0`. |
+| `next` | url \| null | URL for the next page when `page < total_pages`; otherwise `null`. |
+| `previous` | url \| null | URL for the previous available page when `page > 1`; for the first page and empty datasets it is `null`. |
+| `results` | array | Current page items, serialized by the endpoint-specific serializer. |
 
-| Endpoint | Shape |
+### 6.2 Query parameters
+
+Every API-05 paginated endpoint accepts `page` and `page_size`:
+
+| Rule | Behaviour |
 |---|---|
-| `GET /api/v1/catalog/products/` | `{"count": int, "next": url\|null, "previous": url\|null, "results": [...]}` — page size 20, `?page=`; `page_size` is accepted by the query serializer but **ignored** by the paginator (`PAGE_SIZE_QUERY_PARAM` is unset). ⚠️ **GAP** |
+| `page` | Integer ≥ 1. Missing → `1`. Non-integer, zero, or negative → `400` canonical error envelope. |
+| `page_size` | Integer 1–100. Missing → `20`. Non-integer, zero, negative, or > 100 → `400` canonical error envelope. |
+| Repeated occurrences | The **last** value is used (DRF `QueryDict` semantics). |
+| `page` beyond last | **Not an error.** Returns `200` with `results: []`, the echoed requested `page`, and the real `count`/`total_pages`. |
+| Invalid values | Must use the API-04 canonical error envelope (§5) — no other error body is emitted. |
 
-**B. Paginated — bespoke shape (reviews only)**
+### 6.3 Deterministic ordering
 
-| Endpoint | Shape |
-|---|---|
-| `GET /api/v1/reviews/` (`ordering` ≠ `helpful`) | `{"count", "page", "page_size", "total_pages", "results"}` |
-| `GET /api/v1/reviews/` (`ordering=helpful`) | `{"count", "page", "page_size", "results"}` — **no `total_pages`**, and sorting is done in Python over the fully materialised queryset. ⚠️ **GAP** (shape drift *within one endpoint* + unbounded memory) |
+Every paginated queryset MUST have explicit deterministic ordering. The
+implementation preserves any contractually meaningful primary ordering and
+adds `pk` as a stable tie-breaker (e.g. `-created_at`, `pk`) so page boundaries
+do not depend on unspecified database order. No page may silently change on a
+re-request without a model change.
 
-**C. Intentionally non-paginated (bare JSON array)** — small, bounded
-collections; documented as a deliberate decision:
+### 6.4 Empty results
 
-`GET /api/v1/catalog/categories/` (tree; pagination would break the hierarchy),
-`GET /api/v1/catalog/brands/`,
-`GET /api/v1/catalog/products/by-slugs/` (hard cap of 20 slugs),
-`GET /api/v1/users/addresses/` (per-user cap),
-`GET /api/v1/shipping/methods/`.
+There is exactly one representation for all empty outcomes:
 
-**D. Non-paginated and potentially unbounded** ⚠️ **GAP** — these return a bare
-JSON array (or an embedded array) whose size grows with the dataset:
+```json
+{"count": 0, "page": 1, "page_size": 20, "total_pages": 0, "next": null, "previous": null, "results": []}
+```
 
-`GET /api/v1/orders/`, `GET /api/v1/payments/`,
-`GET /api/v1/inventory/`, `GET /api/v1/inventory/{variant_id}/movements/`,
-`GET /api/v1/pricing/variants/{variant_id}/history/`,
-`GET /api/v1/discounts/coupons/`,
-`GET /api/v1/shipping/shipments/`,
-`GET /api/v1/notifications/`, `GET /api/v1/notifications/unread/`,
-`GET /api/v1/wishlist/` (items embedded in the object),
-`GET /api/v1/cart/` (items embedded in the object).
+This is used for: an empty dataset, a valid page that happens to contain zero
+items, and a page number beyond the last page. No endpoint invents a new HTTP
+status for these cases.
 
-**No pagination behaviour is normalized by API-01.**
-🔁 **FOLLOW-UP: API-05 (collection/pagination contract).**
+### 6.5 Endpoint classification
 
-❓ **DECISION REQUIRED (API-05):** one envelope for all collections
-(`count`/`next`/`previous`/`results` vs `count`/`page`/`page_size`/`total_pages`),
-whether embedded child collections (cart items, wishlist items, payment events,
-product variants/images) are exempt, and whether `page_size` becomes a
-first-class query parameter.
+**Paginated under API-05:**
+
+1. `GET /api/v1/catalog/products/`
+2. `GET /api/v1/reviews/`
+3. `GET /api/v1/orders/`
+4. `GET /api/v1/payments/`
+5. `GET /api/v1/inventory/`
+6. `GET /api/v1/inventory/{variant_id}/movements/`
+7. `GET /api/v1/pricing/variants/{variant_id}/history/`
+8. `GET /api/v1/discounts/coupons/`
+9. `GET /api/v1/shipping/shipments/`
+10. `GET /api/v1/notifications/`
+11. `GET /api/v1/notifications/unread/`
+
+**Intentionally non-paginated (explicit exceptions documented by API-01):**
+
+* `GET /api/v1/catalog/categories/` — recursive tree; pagination would break
+  the hierarchy.
+* `GET /api/v1/catalog/brands/` — small reference collection.
+* `GET /api/v1/catalog/products/by-slugs/` — bounded by the existing 20-slug
+  hard cap.
+* `GET /api/v1/users/addresses/` — bounded per-user reference data.
+* `GET /api/v1/shipping/methods/` — bounded reference data.
+
+**Intentionally non-paginated aggregate/resource endpoints (new API-05
+classification, not a shape change):**
+
+* `GET /api/v1/cart/` and the cart mutation responses — the cart is one
+  aggregate object; its embedded `items[]` child collection is part of the
+  aggregate and is **not** paginated.
+* `GET /api/v1/wishlist/` and its mutations — likewise an aggregate object
+  with an embedded `items[]` child collection, not a flat list endpoint.
+* Embedded detail collections that belong to a single resource
+  (payment `events[]`, order `items[]`, product `variants[]`/`images[]`).
+* Analytics reports (`/analytics/*`) — read-only aggregates bounded by the
+  existing `days`/`limit` report contract.
+* Bulk action responses that return a created/affected set
+  (pricing bulk-price, shipping cost calculation, etc.).
+
+Non-collection endpoints (single-resource detail, counters such as
+`unread-count`, and mutating actions) are outside the pagination contract.
+
+### 6.6 Notifications representation
+
+Both `GET /api/v1/notifications/` and `GET /api/v1/notifications/unread/` are
+paginated under API-05 and expose **the same full item serializer**
+(`NotificationSerializer`), not a reduced list representation. The historical
+drift between the two list endpoints is closed.
 
 ---
 
@@ -570,7 +630,7 @@ address/review/wishlist deletes.
 `GET` `200` → **bare array** of `AddressOutputSerializer`
 (`id`, `recipient_name`, `country`, `region`, `city`, `street`, `postal_code`,
 `notes`, `is_default`, `created_at`, `updated_at`), default address first, then
-by date. Not paginated (§6 class C).
+by date. Intentionally non-paginated (§6.5).
 `POST` body `AddressInputSerializer` (`recipient_name`, `country`, `region`,
 `city`, `street`, `postal_code`, `notes`, `is_default`) → `201` with the created
 address. `400` when the per-user address limit is exceeded.
@@ -599,7 +659,7 @@ demoted. **Idempotent**: repeating the call is a no-op returning `200`.
 | 19 | GET | `/api/v1/catalog/brands/` | Public |
 | 20 | GET | `/api/v1/catalog/brands/{slug}/` | Public |
 
-**12. `GET /catalog/products/`** — Public. **Paginated (DRF shape, §6 class A).**
+**12. `GET /catalog/products/`** — Public. **Paginated under API-05 (§6).**
 Query parameters (validated by `ProductListQuerySerializer`; unknown parameters
 are ignored):
 
@@ -611,17 +671,18 @@ are ignored):
 | `min_price` / `max_price` | decimal ≥ 0, 2 dp | Denormalized price-range filter. |
 | `search` | string ≤ 200 | Full-text search (PostgreSQL `SearchVector`). |
 | `ordering` | string | Whitelist: `created_at`, `-created_at`, `min_price`, `-min_price`, `rating`, `-rating`, `views_count`, `-views_count`, `name`, `-name`. **Any other value silently falls back to `-created_at`** ⚠️ **GAP** (invalid input is not rejected). Default `-created_at`. |
-| `page` | int ≥ 1 | Page number. Out-of-range → `404`. |
-| `page_size` | int 1–100 | **Accepted and validated but ignored** — page size is fixed at 20. ⚠️ **GAP**. |
+| `page` | int ≥ 1 | API-05 page semantics (§6.2); page beyond the last page returns `200` with empty `results`. |
+| `page_size` | int 1–100 | API-05 page size semantics (§6.2); default 20. |
 | `is_featured`, `status` | bool / string | Declared on the query serializer but **not passed to the service** — currently inert. ⚠️ **GAP**. |
 
-`200` → `{"count", "next", "previous", "results": [ProductListSerializer]}`.
+`200` → canonical API-05 envelope (§6.1) with `results` of `ProductListSerializer`.
 `ProductListSerializer`: `id` (**UUID**), `name`, `slug`, `brand_name`,
 `brand_slug`, `primary_category_name`, `primary_category_slug`, `main_image`
 (URL|null), `min_price`/`max_price` (money strings|null), `price_range` (string),
 `rating` (decimal string), `reviews_count`, `is_featured`, `status`,
 `published_at`, `created_at`.
-`400` on malformed query parameters (e.g. `min_price=abc`).
+`400` on malformed query parameters (e.g. `min_price=abc`, invalid pagination
+values — API-04 envelope).
 ⚠️ **GAP:** the service computes `applied_filters` but the view discards it —
 the response carries no echo of the applied filters.
 
@@ -659,7 +720,7 @@ UUID, `400` validation. A non-UUID path segment does not match the route → `40
 
 **17. `GET /catalog/categories/`** — Public. `200` → **bare array**, recursive
 tree: `id`, `name`, `slug`, `url_path`, `depth`, `is_active`, `children[]`.
-Intentionally non-paginated (§6 class C).
+Intentionally non-paginated (§6.5).
 
 **18. `GET /catalog/categories/{slug}/`** — Public. `200` → `id`, `name`, `slug`,
 `description`, `image`, `url_path`, `full_name_cached`, `depth`, `is_active`,
@@ -725,9 +786,9 @@ follow-up, see G-10).
 | 30 | PATCH | `/api/v1/orders/{order_number}/status/` | Staff |
 | 31 | POST | `/api/v1/orders/{order_number}/cancel/` | Auth (owner or staff) |
 
-**27. `GET /orders/`** → `200` **bare array** of `OrderListSerializer`
-(`id`, `order_number`, `status`, `status_display`, `total`, `items_count`,
-`created_at`), scoped to `request.user`. Not paginated ⚠️ **GAP** (§6 class D).
+**27. `GET /orders/`** → `200` canonical API-05 envelope (§6.1) with
+`OrderListSerializer` items (`id`, `order_number`, `status`, `status_display`,
+`total`, `items_count`, `created_at`), scoped to `request.user`. Paginated.
 Staff see only their own orders here — there is no admin order list endpoint.
 ⚠️ **GAP / ❓ DECISION REQUIRED.**
 
@@ -772,10 +833,10 @@ Second cancel of an already-cancelled order → `400`.
 
 All require `IsAdminUser` (`401` anonymous, `403` authenticated non-staff).
 
-**32.** `200` → **bare array** of `StockSerializer`
+**32.** `200` → canonical API-05 envelope (§6.1) with `StockSerializer` items
 (`id`, `variant_id`, `sku`, `product_name`, `quantity`, `reserved_quantity`,
 `available_quantity`, `is_low_stock`, `is_out_of_stock`,
-`low_stock_threshold`). Not paginated, whole-catalogue scan ⚠️ **GAP**.
+`low_stock_threshold`). Paginated.
 **33.** `200` → one `StockSerializer`; the stock row is **created on demand** if
 absent, so a `GET` can write ⚠️ **GAP** (side-effecting read).
 `404 {"detail": "Вариант товара не найден."}` for an unknown variant.
@@ -786,9 +847,10 @@ idempotent.
 **35.** Body `{"new_quantity": int ≥ 0, "note": str}` → **`200`** (not `201`,
 although it also creates a `StockMovement` row) ⚠️ **GAP**. Sets an absolute
 value, therefore effectively idempotent.
-**36.** `200` → **bare array** of movements, newest first. When no `Stock` row
-exists the endpoint returns `200 []` rather than `404` ⚠️ **GAP** (inconsistent
-with #33, which `404`s only for an unknown variant).
+**36.** `200` → canonical API-05 envelope (§6.1) with movements, newest first
+and deterministically tie-broken. When no `Stock` row exists the endpoint
+returns the canonical empty envelope (`count: 0, results: []`) rather than
+`404`; an unknown variant still returns `404`.
 
 ### 9.6 Pricing (`apps.pricing`) — Staff only
 
@@ -807,9 +869,9 @@ with #33, which `404`s only for an unknown variant).
 **`200`** even when the price row is created ⚠️ **GAP** (upsert returning `200`).
 Writes a `PriceHistory` audit row with `changed_by = request.user`. Idempotent
 for identical payloads in effect, but each call appends history.
-**39.** `200` → **bare array** of `PriceHistorySerializer` (`id`, `old_price`,
-`new_price`, `old_sale_price`, `new_sale_price`, `changed_by` (PK), `reason`,
-`created_at`), newest first. Not paginated ⚠️ **GAP**.
+**39.** `200` → canonical API-05 envelope (§6.1) with `PriceHistorySerializer`
+items (`id`, `old_price`, `new_price`, `old_sale_price`, `new_sale_price`,
+`changed_by` (PK), `reason`, `created_at`), newest first. Paginated.
 **40.** Body `{"prices": [{"variant_id", "price", "sale_price?"}, …]}` →
 `200` **bare array** of resulting `PriceSerializer` objects. Atomic
 (`transaction.atomic` in the service): all or nothing. `400` if any entry is
@@ -827,9 +889,10 @@ supported; confirm at freeze.
 | 45 | POST | `/api/v1/payments/{payment_number}/refund/` | Staff |
 | 46 | POST | `/api/v1/payments/{payment_number}/cancel/` | Auth (owner or staff) |
 
-**41.** `200` → **bare array** of `PaymentListSerializer` (`id`, `order_number`,
-`status`, `status_display`, `amount`, `method`, `method_display`, `provider`,
-`created_at`, `paid_at`), scoped to the caller. Not paginated ⚠️ **GAP**.
+**41.** `200` → canonical API-05 envelope (§6.1) with `PaymentListSerializer`
+items (`id`, `order_number`, `status`, `status_display`, `amount`, `method`,
+`method_display`, `provider`, `created_at`, `paid_at`), scoped to the caller.
+Paginated.
 **42.** Body `{"order_id": int, "amount": decimal?, "method": choice
 (default `card`), "provider": str (default `mock`)}`. When `amount` is omitted
 the order total is used. `201` → `PaymentSerializer` (adds `is_terminal`,
@@ -891,26 +954,28 @@ payment is not refundable or the amount exceeds the refundable balance.
 | 51 | DELETE | `/api/v1/reviews/{review_id}/` | Auth (author or staff) |
 | 52 | POST | `/api/v1/reviews/{review_id}/helpful/` | Auth |
 
-**47. `GET /reviews/`** — Public, **paginated with a bespoke envelope** (§6 B).
+**47. `GET /reviews/`** — Public, **paginated under API-05** (§6).
 Query parameters (parsed by hand, not by a serializer ⚠️ **GAP**):
 
 | Param | Behaviour |
 |---|---|
 | `product_id` | int; non-numeric → `400 {"product_id": …}`. |
 | `product_uuid` | UUID; ignored when `product_id` is present; malformed or unknown → empty result set (**not** `400`/`404`) ⚠️ **GAP**. |
-| `user_id` | int. **Silently coerced** to the caller's own id for non-staff users ⚠️ **GAP** (a request for another user's reviews returns *your* reviews). Anonymous callers get `200 []` — a **bare array**, breaking the envelope of the same endpoint ⚠️ **GAP**. |
+| `user_id` | int. **Silently coerced** to the caller's own id for non-staff users ⚠️ **GAP** (a request for another user's reviews returns *your* reviews). Anonymous callers get the canonical empty envelope, not a bare array. |
 | `rating`, `rating_gte`, `rating_lte` | int; non-numeric → `400`. No 1–5 range enforcement on `rating_gte`/`rating_lte`. |
 | `verified` | truthy tokens `true`/`1`/`yes` only; anything else is ignored. |
 | `ordering` | `rating`, `-rating`, `created_at`, `-created_at`, `helpful`; invalid values fall back to `-created_at` silently ⚠️ **GAP**. |
-| `page`, `page_size` | `int()` without try/except → a non-numeric value raises `ValueError` → **`500`** ⚠️ **GAP (defect-level)**. `page_size` capped at 100. |
+| `page`, `page_size` | API-05 semantics (§6.2); invalid values → `400` canonical envelope (no `500`). |
 
 Default scope when neither `product_id`, `product_uuid` nor `user_id` is given:
-the caller's own reviews (authenticated) or `200 []` (anonymous).
-Only approved reviews are listed. Response items are `ReviewListSerializer`
-(`id`, `user_id`, `user_email`, `product_id`, `rating`, `title`,
-`verified_purchase`, `helpful_yes`, `helpful_no`, `helpful_score`, `my_vote`,
-`created_at`); `my_vote` is populated only for authenticated callers.
-`ordering=helpful` sorts in Python over the entire matched set.
+the caller's own reviews (authenticated) or the canonical empty envelope
+(anonymous). Only approved reviews are listed. Response items are
+`ReviewListSerializer` (`id`, `user_id`, `user_email`, `product_id`, `rating`,
+`title`, `verified_purchase`, `helpful_yes`, `helpful_no`, `helpful_score`,
+`my_vote`, `created_at`); `my_vote` is populated only for authenticated
+callers. `ordering=helpful` is performed in the database (annotated score) with
+deterministic ties and returns the same canonical envelope as every other
+ordering.
 
 **48. `POST /reviews/`** — Auth. Body `product_id` **or** `product_uuid`,
 `rating` (1–5), `text`, `title?`. `201` → `ReviewSerializer`. Unknown product →
@@ -938,10 +1003,10 @@ same vote clears it; the opposite vote switches it. Therefore **not idempotent**
 | 55 | POST | `/api/v1/discounts/remove/` | Auth |
 | 56 | POST | `/api/v1/discounts/preview/` | Auth |
 
-**53.** `200` → **bare array** of `CouponListSerializer` (`id`, `code`,
-`discount_type`, `discount_value`, `max_discount`, `min_order_amount`,
-`is_valid_now`, `is_exhausted`, `started_at`, `ended_at`) for currently valid
-coupons. Not paginated ⚠️ **GAP**.
+**53.** `200` → canonical API-05 envelope (§6.1) with `CouponListSerializer`
+items (`id`, `code`, `discount_type`, `discount_value`, `max_discount`,
+`min_order_amount`, `is_valid_now`, `is_exhausted`, `started_at`, `ended_at`)
+for currently valid coupons. Paginated.
 **54.** Body `{"code": str, "order_id": int}`. The order is fetched with
 `user=request.user`, so another user's order → `404 {"detail": "Заказ не
 найден."}`. `200` → `{"order_id": int, "discount": "…", "total": "…"}` —
@@ -981,8 +1046,8 @@ shipping_type, cost, estimated_days_display, is_free}]}`. Pure computation.
 Note `cost` is emitted by a hand-built dict, so its JSON type follows the
 underlying `Decimal` serialization of `ShippingCostResponseSerializer`'s
 declared fields ⚠️ **GAP (schema-level)**.
-**59.** `200` → **bare array** of `ShipmentListSerializer`. Staff see **all**
-shipments; other users see only their own. Not paginated ⚠️ **GAP**.
+**59.** `200` → canonical API-05 envelope (§6.1) with `ShipmentListSerializer`
+items. Staff see **all** shipments; other users see only their own. Paginated.
 **60.** Staff. Note the path is `/shipments/create/`, not `POST /shipments/`
 ⚠️ **GAP** (non-RESTful, inconsistent with orders/payments). Body `order_id`,
 `method_id`, `weight_kg?`, `notes?` → `201` `ShipmentDetailSerializer`.
@@ -1042,14 +1107,14 @@ Note this is a `POST`, whereas the cart's clear operation is a `DELETE`
 | 73 | POST | `/api/v1/notifications/read-all/` |
 | 74 | POST | `/api/v1/notifications/{pk}/read/` |
 
-**70.** `200` → **bare array** of `NotificationListSerializer` (`id`,
-`notification_type`, `title`, `status`, `is_read`, `created_at`). Not paginated
-⚠️ **GAP** — an unbounded, monotonically growing per-user collection.
-**71.** `200` → **bare array** of the *full* `NotificationSerializer`
-(`id`, `notification_type`, `channel`, `title`, `body`, `status`,
+**70.** `200` → canonical API-05 envelope (§6.1) with `NotificationSerializer`
+items (`id`, `notification_type`, `channel`, `title`, `body`, `status`,
 `related_object_type`, `related_object_id`, `action_url`, `is_read`, `sent_at`,
-`read_at`, `created_at`). ⚠️ **GAP** — two list endpoints on the same resource
-return **different representations**.
+`read_at`, `created_at`). Paginated.
+**71.** `200` → canonical API-05 envelope (§6.1) with the same full
+`NotificationSerializer` representation, filtered to unread. Paginated. Both
+list endpoints now return **the same representation**; the historical drift is
+closed.
 **72.** `200 {"unread_count": int}`.
 **73.** `200 {"marked": int}`. Idempotent (second call returns `0`).
 **74.** `200` → the full notification. Ownership is enforced in
@@ -1264,12 +1329,14 @@ timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
    in places (`responses={200: 'Discount applied'}`, `'Moved'`, `'Cleared'`,
    `'Removed'`), and the ad-hoc dict responses (discounts, wishlist, analytics,
    notification counters, shipping calculate) are not backed by serializers.
-4. **Query parameters** are only modelled where a query serializer exists
-   (catalog listing). Reviews, analytics, shipping methods and inventory
-   parameters are undocumented in the schema.
+4. **Query parameters** are modelled where a query serializer exists (catalog
+   listing) plus the shared API-05 `page`/`page_size` parameters on every
+   paginated endpoint. Filters and inputs for reviews, analytics, shipping
+   methods and inventory remain undocumented in the schema.
 5. **`/api/v1/health/` is a plain Django view** and is absent from the schema.
-6. **Pagination shapes** (`reviews` bespoke envelope, bare arrays) are not
-   reflected accurately.
+6. The API-05 canonical pagination envelope is reflected in the schema via
+   `PaginationResponseSerializer`; the item schemas inside `results` are
+   generic (`JSONField`) until API-02 hardens schema generation.
 7. `SERVE_INCLUDE_SCHEMA = False`; both docs endpoints are unauthenticated.
 
 **Precedence rule until API-02 lands:** where this document and the generated
@@ -1301,9 +1368,9 @@ the API-02…API-07 scope statements.
 
 | # | Gap | Where | Owner |
 |---|---|---|---|
-| G-1 | Three different collection shapes (DRF envelope / bespoke reviews envelope / bare array) and 11 unbounded non-paginated collections | §6 | **API-05** |
-| G-2 | `page_size` accepted but ignored on catalog listing; not supported elsewhere | §9.2 | **API-05** |
-| G-3 | Reviews list changes shape within one endpoint (`ordering=helpful` drops `total_pages`; anonymous `user_id` returns a bare array) | §9.8 | **API-05** |
+| G-1 | Three different collection shapes (DRF envelope / bespoke reviews envelope / bare array) and 11 unbounded non-paginated collections | §6 | **Closed by API-05** (one canonical envelope; unbounded lists paginated) |
+| G-2 | `page_size` accepted but ignored on catalog listing; not supported elsewhere | §9.2 | **Closed by API-05** (`page`/`page_size` unified on every paginated endpoint) |
+| G-3 | Reviews list changes shape within one endpoint (`ordering=helpful` drops `total_pages`; anonymous `user_id` returns a bare array) | §9.8 | **Closed by API-05** (one envelope for both branches and anonymous empty) |
 | G-4 | `400` bodies mixed string vs list | §5 | **Closed by API-04** (canonical `details` list) |
 | G-5 | No machine-readable error codes | §4, §5 | **Closed by API-04** (`error.code`) |
 | G-6 | Business conflicts return `400`; `409` unused | §5.2 | **Closed by API-04** (`409` remains unused by design) |
@@ -1313,7 +1380,7 @@ the API-02…API-07 scope statements.
 | G-10 | Guest-cart merge (`/cart/merge/`) couples JWT to a cookie session; password change/reset intentionally keeps existing JWTs/refresh tokens valid (API-03 freeze) | §3.4, §9.3 | Separate auth/cookie follow-up outside API-03 |
 | G-11 | Unauthenticated `/api/v1/schema/` and `/api/v1/docs/` in production | §9.15 | **API-02** |
 | G-12 | Optional `drf_spectacular` imports make schema generation best-effort; no committed artifact, no CI validation | §12 | **API-02** |
-| G-13 | `int()` on `page`/`page_size` (reviews) and `limit` (analytics) without try/except → `500` on non-numeric input | §9.8, §9.13 | **[F-1 (#66)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)** |
+| G-13 | `int()` on `page`/`page_size` (reviews) and `limit` (analytics) without try/except → `500` on non-numeric input | §9.8, §9.13 | `page`/`page_size` closed by API-05; analytics `limit` remains **[F-1 (#66)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)** |
 | G-14 | Reviews list query parameters are hand-parsed; `ordering` and `product_uuid` fail silently instead of `400` | §9.8 | **API-05** (with [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)) |
 | G-15 | `?ordering=` invalid value silently falls back on catalog listing; `is_featured`/`status` query params are inert | §9.2 | **API-05** |
 | G-16 | `GET /reviews/?user_id=<other>` silently rewrites to the caller's id | §9.8, §10 | **[F-2 (#67)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/67)** |
@@ -1341,7 +1408,8 @@ the API-02…API-07 scope statements.
 3. Timestamps are **UTC ISO-8601 with a `Z` suffix** (§8.2) — normative.
 4. Empty optional text is `""`, empty collections are `[]` (§8.3) — normative.
 5. Categories, brands, addresses, shipping methods and `by-slugs` are
-   **intentionally non-paginated** (§6 class C) — normative, exempt from API-05.
+   **intentionally non-paginated** (§6.5) — normative, exempt from API-05.
+   Cart/wishlist aggregates (embedded `items[]`) are likewise exempt.
 6. Payment webhook `200`-on-unknown-payment and `502`-on-transient-failure are
    **intentional provider-retry signalling** (§11.3) — normative.
 7. Path-based versioning with no DRF versioning class is **intentional** (§2).
@@ -1359,7 +1427,7 @@ API v1 **cannot be frozen** until the following are closed:
 | **API-02 — OpenAPI contract** | Remove the optional `drf_spectacular` import fallbacks so schema generation is mandatory; annotate every response (no string-literal responses); document query parameters; include health; commit and CI-validate a schema artifact; decide on protecting `/schema/` and `/docs/`; invert the precedence rule in §12. Closes G-11, G-12, G-25. |
 | **API-03 — Authentication contract** | Logout / refresh-token revocation; explicit access-token no-blacklist policy; deterministic password change/reset lifecycle; account deactivation behaviour. Closes the logout portion of G-10; the `/cart/merge/` cookie coupling remains a separate follow-up. |
 | **API-04 — Error contract** | One error envelope with stable machine-readable codes; `400` body type consistency; `409` remains unused by design; production-safe `5xx`. Closes G-4, G-5, G-6, G-7, G-29. Success-path G-8/G-9/G-26/G-31 are out of this ticket. |
-| **API-05 — Collection/pagination contract** | One pagination envelope; `page_size` as a first-class parameter; paginate the 11 unbounded collections; unify notification representations; validate list query parameters. Closes G-1, G-2, G-3, G-14, G-15, G-24. |
+| **API-05 — Collection/pagination contract** | One canonical pagination envelope; `page`/`page_size` as first-class parameters with deterministic bounds and API-04 invalid-value handling; deterministic ordering; paginate the 11 unbounded collections; unify notification representations. Closes G-1, G-2, G-3, G-24; resolves the `page`/`page_size` half of G-13. |
 | **API-06 — API integration/contract tests** | Executable tests asserting every claim in §9 (status codes, shapes, ownership `404`s, pagination envelopes, webhook signature handling), so the contract cannot silently drift. |
 | **API-07 — End-to-end business scenarios** | Idempotency keys for order and payment creation; the full guest→cart→order→payment→shipment→review journey as a contract-level scenario. Closes G-20. |
 | **New follow-ups [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)–[#77](https://github.com/Kvasha62/Amazone_Clone_Production/issues/77)**, excluding the withdrawn [#68](https://github.com/Kvasha62/Amazone_Clone_Production/issues/68) | The defect- and policy-level items in §13 that are out of scope for API-02…API-07 and each need their own issue. |

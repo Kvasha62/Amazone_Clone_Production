@@ -5,10 +5,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.notifications.serializers import (
-    NotificationListSerializer,
-    NotificationSerializer,
+from apps.core.pagination import (
+    build_paginated_response_data,
+    paginate_queryset,
+    pagination_parameters,
 )
+from apps.core.serializers import PaginationResponseSerializer
+from apps.notifications.serializers import NotificationSerializer
 from apps.notifications.services.notification_service import NotificationService
 
 try:
@@ -25,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 @extend_schema_view(
-    get=extend_schema(summary='Все уведомления пользователя'),
+    get=extend_schema(
+        summary='Все уведомления пользователя',
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
+    ),
 )
 class NotificationListView(APIView):
     """GET /api/v1/notifications/"""
@@ -33,12 +40,19 @@ class NotificationListView(APIView):
 
     def get(self, request):
         notifications = NotificationService.get_all(request.user)
-        serializer = NotificationListSerializer(notifications, many=True)
-        return Response(serializer.data)
+        page_items, meta = paginate_queryset(notifications, request)
+        serializer = NotificationSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
 
 @extend_schema_view(
-    get=extend_schema(summary='Непрочитанные уведомления'),
+    get=extend_schema(
+        summary='Непрочитанные уведомления',
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
+    ),
 )
 class NotificationUnreadListView(APIView):
     """GET /api/v1/notifications/unread/"""
@@ -46,8 +60,11 @@ class NotificationUnreadListView(APIView):
 
     def get(self, request):
         notifications = NotificationService.get_unread(request.user)
-        serializer = NotificationSerializer(notifications, many=True)
-        return Response(serializer.data)
+        page_items, meta = paginate_queryset(notifications, request)
+        serializer = NotificationSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
 
 @extend_schema_view(

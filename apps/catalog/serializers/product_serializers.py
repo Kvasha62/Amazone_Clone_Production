@@ -428,8 +428,9 @@ class ProductListQuerySerializer(serializers.Serializer):
     )
     is_featured = serializers.BooleanField(required=False)
     status = serializers.CharField(required=False)
-    page = serializers.IntegerField(required=False, min_value=1)
-    page_size = serializers.IntegerField(required=False, min_value=1, max_value=100)
+    # ``page``/``page_size`` are NOT declared here: they are documented and
+    # validated by the shared API-05 pagination contract (apps/core/pagination),
+    # so the OpenAPI schema does not declare them twice.
 
 
 class CreateProductInputSerializer(serializers.Serializer):

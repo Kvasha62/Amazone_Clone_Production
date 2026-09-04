@@ -52,6 +52,9 @@ class OrderAPITests(TestCase):
         url = reverse('orders:order-list')
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(len(response.data['results']), 1)
+        self.assertIn('total_pages', response.data)
 
     def test_list_orders_unauthenticated(self):
         """GET /api/v1/orders/ без токена → 401."""

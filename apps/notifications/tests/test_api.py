@@ -20,7 +20,10 @@ class NotificationListAPITests(TestCase):
         url = reverse('notifications:notification-list')
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(resp.data), 2)
+        self.assertEqual(resp.data['count'], 2)
+        self.assertEqual(len(resp.data['results']), 2)
+        # Both notification collections use the full representation.
+        self.assertIn('body', resp.data['results'][0])
 
     def test_requires_auth(self):
         self.client.logout()
@@ -41,7 +44,9 @@ class NotificationUnreadAPITests(TestCase):
         url = reverse('notifications:notification-unread')
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(len(resp.data['results']), 1)
+        self.assertIn('body', resp.data['results'][0])
 
     def test_unread_count(self):
         create_test_notification(self.user)
