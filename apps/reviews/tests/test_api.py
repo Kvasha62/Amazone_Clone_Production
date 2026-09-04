@@ -112,7 +112,9 @@ class ReviewListPublicTests(CatalogTestCase):
     def test_anonymous_without_product_filter(self):
         resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data, [])
+        self.assertEqual(resp.data['count'], 0)
+        self.assertEqual(resp.data['results'], [])
+        self.assertEqual(resp.data['total_pages'], 0)
 
     def test_list_my_vote_for_authenticated(self):
         """Авторизованный пользователь видит свой голос (my_vote)."""

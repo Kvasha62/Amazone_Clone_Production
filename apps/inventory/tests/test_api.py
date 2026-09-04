@@ -30,6 +30,8 @@ class InventoryAPITests(CatalogTestCase):
     def test_list_stocks(self):
         resp = self.client.get('/api/v1/inventory/')
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(len(resp.data['results']), 1)
 
     def test_list_stocks_non_staff(self):
         non_staff = create_test_user()
@@ -87,7 +89,9 @@ class InventoryAPITests(CatalogTestCase):
             f'/api/v1/inventory/{self.variant_128.pk}/movements/',
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data), 0)
+        self.assertEqual(resp.data['count'], 0)
+        self.assertEqual(resp.data['results'], [])
+        self.assertEqual(resp.data['total_pages'], 0)
 
     def test_movements_after_restock(self):
         self.client.post(
@@ -99,5 +103,6 @@ class InventoryAPITests(CatalogTestCase):
             f'/api/v1/inventory/{self.variant_128.pk}/movements/',
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data), 1)
-        self.assertEqual(resp.data[0]['kind'], 'in')
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(len(resp.data['results']), 1)
+        self.assertEqual(resp.data['results'][0]['kind'], 'in')

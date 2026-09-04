@@ -26,12 +26,20 @@
 
 import logging
 
-from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
+from django.db.models import F
 from rest_framework import status
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
 
 from apps.catalog.models import Product
 from apps.reviews.models import Review
@@ -59,10 +67,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ── Кол-во отзывов на страницу по умолчанию ──
-DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
-
 # ── Допустимые поля сортировки ──
 VALID_ORDERINGS = {
     'rating', '-rating',
@@ -80,7 +84,8 @@ VALID_ORDERINGS = {
             'Сортировка: ?ordering=-rating|rating|-created_at|created_at|helpful\n'
             'Пагинация: ?page=1&page_size=20'
         ),
-        responses={200: ReviewListSerializer(many=True)},
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
     ),
     post=extend_schema(
         summary='Создать отзыв',
@@ -155,7 +160,10 @@ class ReviewListView(APIView):
                     uid = request.user.pk
             else:
                 # Аноним не может запрашивать чужие отзывы
-                return Response([])
+                _, meta = paginate_queryset(Review.objects.none(), request)
+                return Response(
+                    build_paginated_response_data(request, [], meta),
+                )
             qs = qs.for_user_id(uid)
         elif not product_id and not product_uuid:
             # Нет фильтра по товару — если авторизован, показываем свои отзывы;
@@ -163,7 +171,10 @@ class ReviewListView(APIView):
             if request.user.is_authenticated:
                 qs = qs.for_user(request.user)
             else:
-                return Response([])
+                _, meta = paginate_queryset(Review.objects.none(), request)
+                return Response(
+                    build_paginated_response_data(request, [], meta),
+                )
 
         # ── Фильтр по рейтингу (точное совпадение) ──
         rating_exact = request.query_params.get('rating')
@@ -200,80 +211,30 @@ class ReviewListView(APIView):
             ordering = '-created_at'
 
         if ordering == 'helpful':
-            # helpful_score = helpful_yes - helpful_no (вычисляемое, сортируем в Python)
-            # Для больших объёмов лучше сделать annotate, но для MVP — sort
-            reviews_list = list(qs)
-            reviews_list.sort(
-                key=lambda r: (r.helpful_yes - r.helpful_no),
-                reverse=True,
+            # Apply the existing “most helpful” ordering in the database and
+            # keep deterministic ties for stable pages. The alias intentionally
+            # differs from the ``helpful_score`` property on ``Review``; Django
+            # would try to set that read-only property on each instance and
+            # raise ``AttributeError``.
+            qs = ensure_deterministic_ordering(
+                qs.annotate(
+                    helpful_order_score=F('helpful_yes') - F('helpful_no'),
+                ),
+                ['-helpful_order_score', '-created_at'],
             )
-            # Пагинация для отсортированного списка
-            page_num = int(request.query_params.get('page', 1))
-            page_size = min(
-                int(request.query_params.get('page_size', DEFAULT_PAGE_SIZE)),
-                MAX_PAGE_SIZE,
-            )
-            paginator = Paginator(reviews_list, page_size)
-            try:
-                page = paginator.page(page_num)
-            except PageNotAnInteger:
-                page = paginator.page(1)
-            except EmptyPage:
-                page = paginator.page(paginator.num_pages)
-            serializer = ReviewListSerializer(page.object_list, many=True)
-            data = serializer.data
+        else:
+            qs = ensure_deterministic_ordering(qs, [ordering])
 
-            # ── Аннотируем my_vote для авторизованных ──
-            if request.user.is_authenticated:
-                from apps.reviews.models import ReviewHelpfulVote
-                review_ids = [r.id for r in page.object_list]
-                user_votes = dict(
-                    ReviewHelpfulVote.objects.filter(
-                        user=request.user,
-                        review_id__in=review_ids,
-                    ).values_list('review_id', 'vote')
-                )
-                for item in data:
-                    item['my_vote'] = user_votes.get(item['id'])
+        # ── Пагинация (canonical API-05 envelope) ──
+        page_items, meta = paginate_queryset(qs, request)
 
-            return Response({
-                'count': paginator.count,
-                'page': page.number,
-                'page_size': page_size,
-                'results': data,
-            })
-
-        # Обычная DB-сортировка
-        if ordering in ('-created_at',):
-            qs = qs.order_by('-created_at')
-        elif ordering == 'created_at':
-            qs = qs.order_by('created_at')
-        elif ordering == 'rating':
-            qs = qs.order_by('rating')
-        elif ordering == '-rating':
-            qs = qs.order_by('-rating')
-
-        # ── Пагинация ──
-        page_num = int(request.query_params.get('page', 1))
-        page_size = min(
-            int(request.query_params.get('page_size', DEFAULT_PAGE_SIZE)),
-            MAX_PAGE_SIZE,
-        )
-        paginator = Paginator(qs, page_size)
-        try:
-            page = paginator.page(page_num)
-        except PageNotAnInteger:
-            page = paginator.page(1)
-        except EmptyPage:
-            page = paginator.page(paginator.num_pages)
-
-        serializer = ReviewListSerializer(page.object_list, many=True)
+        serializer = ReviewListSerializer(page_items, many=True)
         data = serializer.data
 
         # ── Аннотируем my_vote для авторизованных пользователей ──
         if request.user.is_authenticated:
             from apps.reviews.models import ReviewHelpfulVote
-            review_ids = [r.id for r in page.object_list]
+            review_ids = [r.id for r in page_items]
             user_votes = dict(
                 ReviewHelpfulVote.objects.filter(
                     user=request.user,
@@ -283,13 +244,9 @@ class ReviewListView(APIView):
             for item in data:
                 item['my_vote'] = user_votes.get(item['id'])
 
-        return Response({
-            'count': paginator.count,
-            'page': page.number,
-            'page_size': page_size,
-            'total_pages': paginator.num_pages,
-            'results': data,
-        })
+        return Response(
+            build_paginated_response_data(request, data, meta),
+        )
 
     def post(self, request):
         """POST /api/v1/reviews/ — создать отзыв (требует авторизацию)."""

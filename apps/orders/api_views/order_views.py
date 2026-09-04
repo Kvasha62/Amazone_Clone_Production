@@ -37,6 +37,14 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
+
 from apps.cart.models import Cart
 from apps.cart.services.cart_service import CartService
 from apps.orders.models import Order
@@ -151,7 +159,8 @@ class _OrderViewMixin:
     get=extend_schema(
         summary='Список заказов',
         description='Возвращает список заказов текущего пользователя.',
-        responses={200: OrderListSerializer(many=True)},
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
     ),
     post=extend_schema(
         summary='Оформить заказ',
@@ -187,10 +196,17 @@ class OrderListView(_OrderViewMixin, APIView):
             Order.objects
             .for_user(request.user)
             .annotate(items_count=Count('items'))
+            .select_related('user')
         )
 
-        serializer = OrderListSerializer(orders, many=True)
-        return Response(serializer.data)
+        # API-05: deterministic ordering with a stable pk tie-breaker.
+        orders = ensure_deterministic_ordering(orders, ['-created_at'])
+        page_items, meta = paginate_queryset(orders, request)
+
+        serializer = OrderListSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
     def post(self, request):
         """

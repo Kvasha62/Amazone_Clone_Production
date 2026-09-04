@@ -43,6 +43,14 @@ from rest_framework.response import Response
 # автоматическую content-negotiation, exception handling.
 from rest_framework.views import APIView
 
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
+
 # Product — модель товара (для повторного чтения после create/update).
 from apps.catalog.models import Product
 
@@ -100,7 +108,8 @@ logger = logging.getLogger(__name__)
         # parameters — query-параметры для Swagger UI.
         # ProductListQuerySerializer покажет все параметры:
         # ?category, ?brand, ?min_price, ?max_price, ?search, ?ordering
-        parameters=[ProductListQuerySerializer],
+        parameters=[ProductListQuerySerializer, *pagination_parameters()],
+        responses={200: PaginationResponseSerializer},
     ),
 )
 class ProductListView(APIView):
@@ -124,7 +133,7 @@ class ProductListView(APIView):
         ПОТОК ДАННЫХ:
             1. Валидация query-параметров (serializer)
             2. Получение QuerySet + фильтры (service)
-            3. Пагинация (PageNumberPagination)
+            3. Пагинация (API-05 canonical envelope)
             4. Сериализация страницы (serializer)
             5. Возврат JSON с пагинацией
         """
@@ -156,35 +165,22 @@ class ProductListView(APIView):
         )
 
         # ─── Шаг 3: Пагинация ───
-        # Lazy-импорт — чтобы не загружать модуль пагинации
-        # при импорте файла (используется только в этом методе).
-        from rest_framework.pagination import PageNumberPagination
-
-        # Создаём экземпляр пагинатора.
-        # Настройки (page_size, max_page_size) берутся из settings.py:
-        #   REST_FRAMEWORK = {'PAGE_SIZE': 20, ...}
-        paginator = PageNumberPagination()
-        # paginate_queryset() — выполняет COUNT + SELECT LIMIT/OFFSET.
-        # Возвращает list объектов текущей страницы (выполняет SQL!).
-        # page = None если товаров нет → пустой список.
-        page = paginator.paginate_queryset(queryset, request, view=self)
+        # API-05: deterministic ordering. The service already applies the
+        # whitelisted ordering; add ``pk`` as a stable tie-breaker before
+        # slicing so page boundaries do not depend on unspecified DB order.
+        current_ordering = list(getattr(queryset.query, 'order_by', []) or ['-created_at'])
+        queryset = ensure_deterministic_ordering(queryset, current_ordering)
+        page_items, meta = paginate_queryset(queryset, request)
 
         # ─── Шаг 4: Сериализация ───
         # many=True — сериализируем список (не один объект).
         # ProductListSerializer — минимальный набор полей для listing.
-        serializer = ProductListSerializer(page, many=True)
+        serializer = ProductListSerializer(page_items, many=True)
 
         # ─── Шаг 5: Возврат с пагинацией ───
-        # get_paginated_response() оборачивает данные в:
-        # {
-        #   "count": 150,
-        #   "next": "/api/v1/catalog/products/?page=2",
-        #   "previous": null,
-        #   "results": [...]
-        # }
-        # Без paginator.get_paginated_response(): просто Response(data)
-        # — без информации о пагинации (frontend не знает сколько страниц).
-        return paginator.get_paginated_response(serializer.data)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
 
 # ==========================================================

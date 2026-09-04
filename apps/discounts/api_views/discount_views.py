@@ -5,6 +5,14 @@ from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
+
 from apps.discounts.models import Coupon
 from apps.discounts.serializers import (
     ApplyCouponInputSerializer,
@@ -32,7 +40,8 @@ logger = logging.getLogger(__name__)
 @extend_schema_view(
     get=extend_schema(
         summary='Список купонов (staff)',
-        responses={200: CouponListSerializer(many=True)},
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
     ),
 )
 class CouponListView(APIView):
@@ -41,8 +50,13 @@ class CouponListView(APIView):
 
     def get(self, request):
         coupons = Coupon.objects.valid_now().with_campaign()
-        serializer = CouponListSerializer(coupons, many=True)
-        return Response(serializer.data)
+        # API-05: deterministic ordering with a stable pk tie-breaker.
+        coupons = ensure_deterministic_ordering(coupons, ['-created_at'])
+        page_items, meta = paginate_queryset(coupons, request)
+        serializer = CouponListSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
 
 @extend_schema_view(

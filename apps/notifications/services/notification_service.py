@@ -163,17 +163,17 @@ class NotificationService:
             .for_user(user)
             .unread()
             .select_related('user')
-            .order_by('-created_at')
+            .order_by('-created_at', 'pk')
         )
 
     @staticmethod
-    def get_all(user, *, limit: int = 50):
-        """Возвращает QuerySet всех уведомлений."""
+    def get_all(user):
+        """Возвращает QuerySet всех уведомлений (paginated by the API layer)."""
         return (
             Notification.objects
             .for_user(user)
             .select_related('user')
-            .order_by('-created_at')[:limit]
+            .order_by('-created_at', 'pk')
         )
 
     @staticmethod

@@ -23,6 +23,14 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
+
 from apps.catalog.models import ProductVariant
 from apps.pricing.models import Price, PriceHistory
 from apps.pricing.serializers import (
@@ -101,7 +109,12 @@ class PriceDetailView(APIView):
 
 
 @extend_schema_view(
-    get=extend_schema(summary='История цен', description='История изменения цены варианта.'),
+    get=extend_schema(
+        summary='История цен',
+        description='История изменения цены варианта.',
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
+    ),
 )
 class PriceHistoryView(APIView):
     """
@@ -116,8 +129,14 @@ class PriceHistoryView(APIView):
         except ProductVariant.DoesNotExist:
             raise NotFound('Вариант не найден.')
 
-        history = PricingService.get_price_history(variant)
-        return Response(PriceHistorySerializer(history, many=True).data)
+        history = PriceHistory.objects.filter(variant=variant)
+        # API-05: deterministic ordering with a stable pk tie-breaker.
+        history = ensure_deterministic_ordering(history, ['-created_at'])
+        page_items, meta = paginate_queryset(history, request)
+        serializer = PriceHistorySerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
 
 @extend_schema_view(

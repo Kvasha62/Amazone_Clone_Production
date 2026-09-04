@@ -110,14 +110,17 @@ class ShipmentListAPITests(TestCase):
         url = reverse('shipping:shipment-list')
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data['count'], 1)
+        self.assertEqual(len(response.data['results']), 1)
 
     def test_list_empty(self):
         """Пустой список если нет отправлений."""
         url = reverse('shipping:shipment-list')
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 0)
+        self.assertEqual(response.data['count'], 0)
+        self.assertEqual(response.data['results'], [])
+        self.assertEqual(response.data['total_pages'], 0)
 
 
 class ShipmentCreateAPITests(TestCase):

@@ -27,6 +27,14 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
+
 from apps.catalog.models import ProductVariant
 from apps.inventory.models import Stock, StockMovement
 from apps.inventory.serializers import (
@@ -70,7 +78,8 @@ def _get_variant(variant_id: int) -> ProductVariant:
     get=extend_schema(
         summary='Остатки на складе',
         description='Возвращает список остатков всех вариантов (staff only).',
-        responses={200: StockSerializer(many=True)},
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
     ),
 )
 class StockListView(APIView):
@@ -80,8 +89,14 @@ class StockListView(APIView):
 
     def get(self, request):
         stocks = Stock.objects.with_variant().all()
-        serializer = StockSerializer(stocks, many=True)
-        return Response(serializer.data)
+        # API-05: deterministic ordering with a stable pk tie-breaker.
+        stocks = ensure_deterministic_ordering(stocks, ['-created_at'])
+        page_items, meta = paginate_queryset(stocks, request)
+
+        serializer = StockSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
 
 # ==============================================================
@@ -185,7 +200,8 @@ class StockAdjustView(APIView):
     get=extend_schema(
         summary='История движений',
         description='Возвращает историю движений для варианта.',
-        responses={200: StockMovementSerializer(many=True)},
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
     ),
 )
 class StockMovementListView(APIView):
@@ -201,8 +217,20 @@ class StockMovementListView(APIView):
         try:
             stock = Stock.objects.get(variant=variant)
         except Stock.DoesNotExist:
-            return Response([])
+            stock = None
+
+        if stock is None:
+            # Empty collection: canonical envelope instead of a bare array.
+            page_items, meta = paginate_queryset(StockMovement.objects.none(), request)
+            return Response(
+                build_paginated_response_data(request, [], meta),
+            )
 
         movements = stock.movements.all()
-        serializer = StockMovementSerializer(movements, many=True)
-        return Response(serializer.data)
+        # API-05: deterministic ordering with a stable pk tie-breaker.
+        movements = ensure_deterministic_ordering(movements, ['-created_at'])
+        page_items, meta = paginate_queryset(movements, request)
+        serializer = StockMovementSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )

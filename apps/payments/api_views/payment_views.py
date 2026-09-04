@@ -36,6 +36,14 @@ from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.pagination import (
+    build_paginated_response_data,
+    ensure_deterministic_ordering,
+    paginate_queryset,
+    pagination_parameters,
+)
+from apps.core.serializers import PaginationResponseSerializer
+
 from apps.orders.models import Order
 from apps.orders.models.order import OrderStatus
 from apps.payments.constants import PAYMENT_EVENT_ORDER_CONFIRM_FAILED
@@ -112,7 +120,8 @@ class _PaymentViewMixin:
     get=extend_schema(
         summary='Список платежей',
         description='Возвращает список платежей текущего пользователя.',
-        responses={200: PaymentListSerializer(many=True)},
+        parameters=pagination_parameters(),
+        responses={200: PaginationResponseSerializer},
     ),
     post=extend_schema(
         summary='Создать платёж',
@@ -133,9 +142,17 @@ class PaymentListView(_PaymentViewMixin, APIView):
 
         ВОЗВРАЩАЕТ список платежей текущего пользователя.
         """
-        payments = Payment.objects.for_user(request.user)
-        serializer = PaymentListSerializer(payments, many=True)
-        return Response(serializer.data)
+        payments = Payment.objects.for_user(request.user).select_related(
+            'order', 'user',
+        )
+        # API-05: deterministic ordering with a stable pk tie-breaker.
+        payments = ensure_deterministic_ordering(payments, ['-created_at'])
+        page_items, meta = paginate_queryset(payments, request)
+
+        serializer = PaymentListSerializer(page_items, many=True)
+        return Response(
+            build_paginated_response_data(request, serializer.data, meta),
+        )
 
     def post(self, request):
         """
