@@ -62,18 +62,14 @@ class AnalyticsF1Base(CatalogTestCase):
 
     def assert_success_200(self, resp):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, msg=resp.content[:800])
-        # No leak
-        if resp['Content-Type'].startswith('application/json'):
-            try:
-                body = resp.json()
-                leaked = str(body).lower()
-                for token in ('traceback', 'valueerror'):
-                    self.assertNotIn(token, leaked)
-                # Must not be error envelope on success
-                if isinstance(body, dict):
-                    self.assertNotIn('error', body, msg=f'unexpected error envelope in success: {body}')
-            except Exception:
-                pass
+        self.assertTrue(resp['Content-Type'].startswith('application/json'))
+        body = resp.json()
+        leaked = str(body).lower()
+        for token in ('traceback', 'valueerror'):
+            self.assertNotIn(token, leaked)
+        # Must not be error envelope on success
+        if isinstance(body, dict):
+            self.assertNotIn('error', body, msg=f'unexpected error envelope in success: {body}')
 
 
 class AnalyticsLimitValidationTests(AnalyticsF1Base):
