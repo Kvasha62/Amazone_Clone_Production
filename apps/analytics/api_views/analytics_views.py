@@ -22,8 +22,71 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from rest_framework.exceptions import ValidationError
+
+from apps.analytics.constants import PERIOD_CHOICES
 from apps.analytics.serializers import AnalyticsDateRangeSerializer
 from apps.analytics.services.analytics_service import AnalyticsService
+
+_VALID_METRICS = {'revenue', 'quantity'}
+_VALID_PERIODS = {choice[0] for choice in PERIOD_CHOICES}
+
+
+def _parse_limit(request, default: int = 10) -> int:
+    """Parse ``limit`` query param — integer >= 1, default 10.
+
+    Raises ``ValidationError`` so the API-04 handler emits the canonical
+    ``400`` envelope.  No upper bound is enforced here to preserve
+    backward-compatible valid behaviour for large limits; the service
+    slices with ``[:limit]`` and large values simply return at most the
+    available rows.
+    """
+    raw = request.query_params.get('limit')
+    if raw is None:
+        return default
+    if isinstance(raw, (list, tuple)):
+        raw = raw[-1]
+    raw_str = str(raw).strip()
+    if not raw_str:
+        raise ValidationError({'limit': 'Должно быть целым числом.'})
+    try:
+        value = int(raw_str)
+    except (TypeError, ValueError):
+        raise ValidationError({'limit': 'Должно быть целым числом.'})
+    if value < 1:
+        raise ValidationError({'limit': 'Должно быть не меньше 1.'})
+    return value
+
+
+def _parse_metric(request) -> str:
+    """Parse ``metric`` query param — ``revenue`` or ``quantity``."""
+    raw = request.query_params.get('metric', 'revenue')
+    if isinstance(raw, (list, tuple)):
+        raw = raw[-1]
+    value = str(raw).strip()
+    if value not in _VALID_METRICS:
+        raise ValidationError(
+            {'metric': 'Недопустимое значение metric. Допустимо: revenue, quantity.'}
+        )
+    return value
+
+
+def _parse_period(request) -> str:
+    """Parse ``period`` query param — one of ``PERIOD_CHOICES``."""
+    raw = request.query_params.get('period', 'daily')
+    if isinstance(raw, (list, tuple)):
+        raw = raw[-1]
+    value = str(raw).strip()
+    if value not in _VALID_PERIODS:
+        raise ValidationError(
+            {
+                'period': (
+                    f'Недопустимое значение period. Допустимо: '
+                    f'{", ".join(sorted(_VALID_PERIODS))}.'
+                )
+            }
+        )
+    return value
 
 try:
     from drf_spectacular.utils import extend_schema, extend_schema_view
@@ -95,7 +158,7 @@ class SalesTimelineView(APIView):
 
     def get(self, request):
         days = _parse_days(request)
-        period = request.query_params.get('period', 'daily')
+        period = _parse_period(request)
         data = AnalyticsService.get_sales_timeline(
             days=days, period=period,
         )
@@ -116,8 +179,8 @@ class TopProductsView(APIView):
 
     def get(self, request):
         days = _parse_days(request)
-        metric = request.query_params.get('metric', 'revenue')
-        limit = int(request.query_params.get('limit', 10))
+        metric = _parse_metric(request)
+        limit = _parse_limit(request)
         data = AnalyticsService.get_top_products(
             days=days, metric=metric, limit=limit,
         )
@@ -138,7 +201,7 @@ class TopCategoriesView(APIView):
 
     def get(self, request):
         days = _parse_days(request)
-        limit = int(request.query_params.get('limit', 10))
+        limit = _parse_limit(request)
         data = AnalyticsService.get_top_categories(days=days, limit=limit)
         return Response(data)
 
@@ -157,7 +220,7 @@ class TopCustomersView(APIView):
 
     def get(self, request):
         days = _parse_days(request)
-        limit = int(request.query_params.get('limit', 10))
+        limit = _parse_limit(request)
         data = AnalyticsService.get_top_customers(days=days, limit=limit)
         return Response(data)
 
@@ -194,7 +257,7 @@ class MostViewedProductsView(APIView):
 
     def get(self, request):
         days = _parse_days(request)
-        limit = int(request.query_params.get('limit', 10))
+        limit = _parse_limit(request)
         data = AnalyticsService.get_most_viewed_products(
             days=days, limit=limit,
         )
