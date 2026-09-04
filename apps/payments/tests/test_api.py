@@ -20,6 +20,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from apps.core.api_errors import CODE_NOT_FOUND, CODE_VALIDATION
 from apps.orders.tests.factories import create_test_order, create_test_user
 from apps.payments.models import Payment
 from apps.payments.tests.factories import create_test_payment
@@ -56,7 +57,7 @@ class PaymentListAPITests(TestCase):
 
     @override_settings(DEFAULT_THROTTLE_CLASSES=[])
     def test_create_payment(self):
-        """Создание платежа через API."""
+        """Создание платежа через API (свой заказ → 201 flow сохраняется)."""
         self.client.force_authenticate(self.user)
         data = {
             'order_id': self.order.pk,
@@ -67,6 +68,15 @@ class PaymentListAPITests(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertIn('order_number', resp.data)
         self.assertEqual(resp.data['status'], 'pending')
+        # Платёж реально создан: заказ/пользователь/сумма/событие корректны.
+        payment = Payment.objects.get(pk=resp.data['id'])
+        self.assertEqual(payment.order_id, self.order.pk)
+        self.assertEqual(payment.user_id, self.user.pk)
+        self.assertEqual(payment.amount, Decimal('1000.00'))
+        self.assertEqual(payment.status, 'pending')
+        self.assertTrue(
+            payment.events.filter(event_type='created').exists(),
+        )
 
     @override_settings(DEFAULT_THROTTLE_CLASSES=[])
     def test_create_payment_without_amount_uses_order_total(self):
@@ -80,14 +90,171 @@ class PaymentListAPITests(TestCase):
             self.order.total,
         )
 
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
     def test_create_payment_other_users_order(self):
-        """Нельзя создать платёж для чужого заказа."""
+        """Чужой заказ → canonical API-04 404, existence не раскрывается.
+
+        Issue #68: ownership enforced на view boundary — заказ другого
+        пользователя резолвится как несуществующий (404 not_found).
+        """
         self.client.force_authenticate(self.user)
         other_user = create_test_user()
         other_order = create_test_order(other_user)
+        self.assertFalse(other_user.is_staff)
+
         data = {'order_id': other_order.pk, 'amount': '500.00'}
         resp = self.client.post(self.url, data, format='json')
+
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        error = resp.data['error']
+        self.assertEqual(set(error), {'code', 'message', 'details'})
+        self.assertEqual(error['code'], CODE_NOT_FOUND)
+        self.assertEqual(error['message'], 'Заказ не найден.')
+        # Canonical API-04 details: единственный non-field detail.
+        self.assertEqual(error['details'], [{
+            'field': None,
+            'code': CODE_NOT_FOUND,
+            'message': 'Заказ не найден.',
+        }])
+        # Платёж не создан.
+        self.assertEqual(Payment.objects.count(), 0)
+        # Ответ не раскрывает существование/детали чужого заказа.
+        body_text = resp.content.decode('utf-8').lower()
+        self.assertNotIn(str(other_order.pk), body_text)
+        self.assertNotIn(other_order.order_number.lower(), body_text)
+        self.assertNotIn(other_user.email.lower(), body_text)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_non_existent_order(self):
+        """Несуществующий order_id → canonical API-04 404."""
+        self.client.force_authenticate(self.user)
+        data = {'order_id': 999_999, 'amount': '1000.00'}
+        resp = self.client.post(self.url, data, format='json')
+
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        error = resp.data['error']
+        self.assertEqual(set(error), {'code', 'message', 'details'})
+        self.assertEqual(error['code'], CODE_NOT_FOUND)
+        self.assertEqual(error['message'], 'Заказ не найден.')
+        # Canonical API-04 details: единственный non-field detail.
+        self.assertEqual(error['details'], [{
+            'field': None,
+            'code': CODE_NOT_FOUND,
+            'message': 'Заказ не найден.',
+        }])
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_foreign_and_non_existent_orders_identical(self):
+        """Чужой и несуществующий заказ → неотличимые 404-ответы."""
+        self.client.force_authenticate(self.user)
+        other_user = create_test_user()
+        other_order = create_test_order(other_user)
+
+        foreign = self.client.post(
+            self.url, {'order_id': other_order.pk}, format='json',
+        )
+        missing = self.client.post(
+            self.url, {'order_id': 999_999}, format='json',
+        )
+
+        self.assertEqual(foreign.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(missing.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(foreign.data['error'], missing.data['error'])
+        self.assertEqual(Payment.objects.count(), 0)
+
+    # ── Бизнес-правила не ослаблены (Issue #68: regression guard) ──
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_missing_order_id_returns_400(self):
+        """Некорректный вход (нет order_id) → 400 validation envelope."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            self.url, {'amount': '1000.00'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data['error']['code'], CODE_VALIDATION)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_invalid_amount_returns_400(self):
+        """Сумма вне [MIN_PAYMENT_AMOUNT, MAX_PAYMENT_AMOUNT] → 400."""
+        self.client.force_authenticate(self.user)
+        for amount in ('0.50', '100000000.00'):
+            with self.subTest(amount=amount):
+                resp = self.client.post(
+                    self.url,
+                    {'order_id': self.order.pk, 'amount': amount},
+                    format='json',
+                )
+                self.assertEqual(
+                    resp.status_code,
+                    status.HTTP_400_BAD_REQUEST,
+                )
+                self.assertEqual(
+                    resp.data['error']['code'],
+                    CODE_VALIDATION,
+                )
+                self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_confirmed_order_returns_400(self):
+        """Заказ в статусе ≠ PENDING (CONFIRMED) оплатить нельзя → 400."""
+        self.client.force_authenticate(self.user)
+        self.order.status = 'confirmed'
+        self.order.save()
+        resp = self.client.post(
+            self.url, {'order_id': self.order.pk}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data['error']['code'], CODE_VALIDATION)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_cancelled_order_returns_400(self):
+        """Отменённый заказ оплатить нельзя → 400."""
+        self.client.force_authenticate(self.user)
+        self.order.status = 'cancelled'
+        self.order.save()
+        resp = self.client.post(
+            self.url, {'order_id': self.order.pk}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data['error']['code'], CODE_VALIDATION)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_amount_mismatch_order_total_returns_400(self):
+        """amount != order.total → 400 с ошибкой по полю amount."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            self.url,
+            {'order_id': self.order.pk, 'amount': '500.00'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data['error']['code'], CODE_VALIDATION)
+        fields = [
+            detail['field']
+            for detail in resp.data['error']['details']
+            if detail['field'] is not None
+        ]
+        self.assertIn('amount', fields)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_already_paid_order_returns_400(self):
+        """Успешно оплаченный заказ нельзя оплатить повторно → 400."""
+        create_test_payment(self.order, self.user, status='succeeded')
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            self.url, {'order_id': self.order.pk}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data['error']['code'], CODE_VALIDATION)
+        self.assertIn('уже оплачен', resp.data['error']['message'])
+        # Новых платежей не создано (существующий SUCCEEDED остался один).
+        self.assertEqual(Payment.objects.count(), 1)
 
 
 class PaymentDetailAPITests(TestCase):
