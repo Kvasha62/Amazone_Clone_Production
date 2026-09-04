@@ -805,12 +805,17 @@ class GetShipmentTests(TestCase):
         with self.assertRaises(NotFound):
             ShippingService.get_shipment_by_order(other_order)
 
-    def test_get_by_internal_tracking(self):
-        """Получение по внутреннему треку."""
-        result = ShippingService.get_shipment_by_tracking(
-            self.shipment.internal_tracking,
-        )
-        self.assertEqual(result.pk, self.shipment.pk)
+    def test_get_by_internal_tracking_not_found(self):
+        """Внутренний трек НЕ является публичным ключом поиска (Issue #69).
+
+        ``get_shipment_by_tracking`` резолвит только по внешнему
+        ``tracking_number``; передача существующего ``internal_tracking``
+        должна приводить к тому же ``NotFound``, что и неизвестный номер.
+        """
+        with self.assertRaises(NotFound):
+            ShippingService.get_shipment_by_tracking(
+                self.shipment.internal_tracking,
+            )
 
     def test_get_by_external_tracking(self):
         """Получение по внешнему трек-номеру."""

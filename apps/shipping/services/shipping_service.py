@@ -38,7 +38,7 @@ import logging
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import models, transaction
+from django.db import transaction
 from django.utils import timezone
 
 from rest_framework.exceptions import NotFound, ValidationError
@@ -687,7 +687,15 @@ class ShippingService:
     @staticmethod
     def get_shipment_by_tracking(tracking_number: str) -> Shipment:
         """
-        Возвращает отправление по трек-номеру (внешнему или внутреннему).
+        Возвращает отправление по внешнему трек-номеру (carrier number).
+
+        Публичный endpoint отслеживания резолвит shipment ТОЛЬКО по
+        ``Shipment.tracking_number``. Внутренний идентификатор
+        ``Shipment.internal_tracking`` (``SHP-*``) является внутренним и
+        НЕ принимается публичным endpoint как ключ поиска (Issue #69 /
+        API-01 / F-4). В случае передачи ``internal_tracking`` или
+        полностью неизвестного номера метод ведёт себя одинаково —
+        ``NotFound`` → канонический ``404 not_found``.
 
         RAISES:
             NotFound: если отправление не найдено
@@ -695,11 +703,14 @@ class ShippingService:
         try:
             return Shipment.objects.select_related(
                 'order', 'method', 'method__zone', 'user',
-            ).get(
-                models.Q(tracking_number=tracking_number)
-                | models.Q(internal_tracking=tracking_number)
-            )
+            ).get(tracking_number=tracking_number)
         except Shipment.DoesNotExist:
+            # Публичный endpoint: сообщение об ошибке НЕ должно эхо-отражать
+            # строку запроса (она может быть существующим internal_tracking
+            # или произвольным значением). Единый нейтральный текст делает
+            # ответы для existing internal_tracking и полностью неизвестного
+            # трека неразличимыми (Issue #69 — не раскрывать существование
+            # shipment и не отражать недоверенный ввод).
             raise NotFound(
-                f'Отправление с трек-номером «{tracking_number}» не найдено.'
+                'Отправление не найдено.'
             )
