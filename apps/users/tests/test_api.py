@@ -44,7 +44,8 @@ class RegisterAPITests(AuthAPITestCase):
             'password_confirm': 'DifferentPass!',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('password_confirm', resp.data)
+        fields = [item['field'] for item in resp.data['error']['details']]
+        self.assertIn('password_confirm', fields)
 
     def test_register_duplicate_email(self):
         self.client.post('/api/v1/auth/register/', {

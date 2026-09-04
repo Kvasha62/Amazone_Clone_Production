@@ -27,6 +27,7 @@ import logging
 # Используем константы вместо магических чисел: status.HTTP_201_CREATED
 # вместо 201 — самодокументирующийся код.
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied
 
 # Permission classes:
 #   AllowAny — доступ без авторизации (публичный каталог).
@@ -296,10 +297,7 @@ class ProductCreateView(APIView):
         #   IsAdminUser проверяет is_staff, но не даёт кастомный ответ.
         #   Мы хотим вернуть {'detail': 'Недостаточно прав.'} на русском.
         if not request.user.is_staff:
-            return Response(
-                {'detail': 'Недостаточно прав.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            raise PermissionDenied('Недостаточно прав.')
 
         # ─── Шаг 2: Валидация тела запроса ───
         # request.data — parsed body (JSON → dict).
@@ -370,10 +368,7 @@ class ProductUpdateView(APIView):
         """
         # Проверка прав — аналогично ProductCreateView.
         if not request.user.is_staff:
-            return Response(
-                {'detail': 'Недостаточно прав.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            raise PermissionDenied('Недостаточно прав.')
 
         # Получаем товар по UUID (с for_card() prefetch).
         # get_product_by_uuid() проверяет status=ACTIVE.

@@ -298,7 +298,7 @@ class WebhookOrderConfirmationRecoveryTests(TestCase):
 
     @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
     def test_unexpected_close_payment_failure_propagates(self):
-        """F-17: closing a payment must not mask unexpected errors as 200."""
+        """F-17 + API-04: unexpected close is not 200; API boundary → 500."""
         order, variant = _make_order_with_item(quantity=5, stock_quantity=2)
         Order.objects.filter(pk=order.pk).update(
             status=OrderStatus.CANCELLED,
@@ -314,8 +314,18 @@ class WebhookOrderConfirmationRecoveryTests(TestCase):
             'fail_payment',
             side_effect=RuntimeError('boom'),
         ):
-            with self.assertRaises(RuntimeError):
-                self._post_signed(payment)
+            resp = self._post_signed(payment)
+
+        self.assertEqual(resp.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        error = resp.data['error']
+        self.assertEqual(error['code'], 'server_error')
+        self.assertEqual(error['details'], [])
+        leaked = str(resp.data).lower()
+        self.assertNotIn('boom', leaked)
+        self.assertNotIn('runtimeerror', leaked)
+        self.assertNotIn('traceback', leaked)
+        payment.refresh_from_db()
+        self.assertNotEqual(payment.status, PAYMENT_STATUS_SUCCEEDED)
 
     @override_settings(PAYMENT_WEBHOOK_SECRET=WEBHOOK_SECRET)
     def test_retry_after_restock_succeeds(self):

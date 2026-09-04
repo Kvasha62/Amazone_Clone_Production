@@ -158,12 +158,16 @@ class LoginContractTests(AuthContractTestCase):
         # login identifier. Status is deterministic even before the request is
         # authenticated against credentials.
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('email', resp.data)
+        self.assertEqual(resp.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in resp.data['error']['details']}
+        self.assertIn('email', fields)
 
     def test_missing_login_credentials_is_deterministic(self):
         resp = self.client.post(self.login_url, {'email': self.user.email}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('password', resp.data)
+        self.assertEqual(resp.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in resp.data['error']['details']}
+        self.assertIn('password', fields)
 
 
 class AccessTokenContractTests(AuthContractTestCase):
@@ -290,7 +294,9 @@ class LogoutContractTests(AuthContractTestCase):
         self._authorize(access)
         resp = self.client.post(self.logout_url, {}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('refresh', resp.data)
+        self.assertEqual(resp.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in resp.data['error']['details']}
+        self.assertIn('refresh', fields)
 
     def test_logout_rejects_refresh_token_of_another_user(self):
         access, own_refresh = self._get_tokens()
@@ -394,7 +400,9 @@ class ChangePasswordContractTests(AuthContractTestCase):
             'new_password_confirm': 'NewPass789!',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('old_password', resp.data)
+        self.assertEqual(resp.data['error']['code'], 'validation_error')
+        fields = {item['field'] for item in resp.data['error']['details']}
+        self.assertIn('old_password', fields)
 
     def test_new_password_becomes_usable_for_login(self):
         access, _ = self._get_tokens()

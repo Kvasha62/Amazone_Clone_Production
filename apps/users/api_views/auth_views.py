@@ -10,6 +10,7 @@
 # ────────────────────────────────────────────────────────────────────────
 
 from rest_framework import serializers, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -112,16 +113,14 @@ class RegisterView(APIView):
 
         # Проверка уникальности email
         if User.objects.filter(email__iexact=data['email']).exists():
-            return Response(
+            raise ValidationError(
                 {'email': 'Пользователь с таким email уже существует.'},
-                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Проверка уникальности username
         if User.objects.filter(username=data['username']).exists():
-            return Response(
+            raise ValidationError(
                 {'username': 'Пользователь с таким именем уже существует.'},
-                status=status.HTTP_400_BAD_REQUEST,
             )
 
         user = User.objects.create_user(
@@ -159,9 +158,8 @@ class ChangePasswordView(APIView):
         user = request.user
 
         if not user.check_password(data['old_password']):
-            return Response(
+            raise ValidationError(
                 {'old_password': 'Неверный текущий пароль.'},
-                status=status.HTTP_400_BAD_REQUEST,
             )
 
         user.set_password(data['new_password'])

@@ -30,6 +30,8 @@ from django.conf import settings
 
 from rest_framework import status
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+
+from apps.core.api_errors import BadGateway
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -388,10 +390,7 @@ class PaymentWebhookView(APIView):
         """
         # ── HMAC-SHA256 аутентификация вебхука ──
         if not self._verify_signature(request):
-            return Response(
-                {'detail': 'Invalid payment webhook signature.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            raise PermissionDenied('Invalid payment webhook signature.')
 
         input_serializer = HandleWebhookInputSerializer(data=request.data)
         input_serializer.is_valid(raise_exception=True)
@@ -458,9 +457,8 @@ class PaymentWebhookView(APIView):
             # Резервирование стока не удалось или сбой БД: платёж
             # откатился вместе с транзакцией. 502 → провайдер повторит
             # доставку, а повторная попытка идемпотентна.
-            return Response(
-                {'detail': 'Подтверждение заказа не удалось; повторите запрос позже.'},
-                status=status.HTTP_502_BAD_GATEWAY,
+            raise BadGateway(
+                'Подтверждение заказа не удалось; повторите запрос позже.',
             )
 
         if payment is None:

@@ -32,6 +32,7 @@ import logging
 # status — HTTP-коды (201 CREATED, 200 OK, 400 BAD REQUEST, etc.).
 # 📖 https://www.django-rest-framework.org/api-guide/status-codes/
 from rest_framework import status
+from rest_framework.exceptions import NotFound, ValidationError
 
 # Permissions:
 #   AllowAny — публичный доступ (без JWT-токена)
@@ -393,10 +394,7 @@ class CartMergeView(APIView):
         # Если frontend не использует session middleware → session_key = None.
         session_key = request.session.session_key
         if not session_key:
-            return Response(
-                {'detail': 'Сессия гостя не найдена.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            raise ValidationError('Сессия гостя не найдена.')
 
         # Вызываем сервис слияния.
         user_cart = CartService.merge_guest_into_user_cart(
@@ -404,10 +402,7 @@ class CartMergeView(APIView):
         )
         if user_cart is None:
             # Нет гостевой корзины — нечего сливать.
-            return Response(
-                {'detail': 'Гостевая корзина не найдена.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            raise NotFound('Гостевая корзина не найдена.')
 
         # Сериализуем итоговую корзину с prefetch.
         cart = Cart.objects.with_items().get(pk=user_cart.pk)
