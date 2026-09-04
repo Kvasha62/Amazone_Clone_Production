@@ -162,20 +162,30 @@ class PaymentListView(_PaymentViewMixin, APIView):
 
         ПОТОК:
           1. Валидация body (CreatePaymentInputSerializer)
-          2. Получение заказа
+          2. Получение заказа с owner scoping (Issue #68 / API-01 F-3)
           3. Определение суммы (из body или из заказа)
           4. PaymentService.create_payment() — бизнес-логика
           5. Сериализация и ответ (201 CREATED)
+
+        OWNERSHIP (API-04 §10, 404-not-403 policy):
+          Заказ резолвится с фильтром user=request.user на boundary view:
+          чужой или несуществующий заказ → canonical 404
+          «Заказ не найден.» — существование ресурса не раскрывается.
+          Service-level ownership check в PaymentService.create_payment()
+          остаётся как defense-in-depth.
         """
         input_serializer = CreatePaymentInputSerializer(data=request.data)
         input_serializer.is_valid(raise_exception=True)
 
         data = input_serializer.validated_data
 
-        # Получаем заказ
-        try:
-            order = Order.objects.get(pk=data['order_id'])
-        except Order.DoesNotExist:
+        # Получаем заказ с owner scoping (IDOR-защита на boundary view):
+        # заказ другого пользователя неотличим от несуществующего → 404.
+        order = Order.objects.filter(
+            pk=data['order_id'],
+            user=request.user,
+        ).first()
+        if order is None:
             raise NotFound('Заказ не найден.')
 
         # Сумма: из body или из total заказа
