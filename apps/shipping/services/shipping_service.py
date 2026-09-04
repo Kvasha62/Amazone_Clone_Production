@@ -705,6 +705,12 @@ class ShippingService:
                 'order', 'method', 'method__zone', 'user',
             ).get(tracking_number=tracking_number)
         except Shipment.DoesNotExist:
+            # Публичный endpoint: сообщение об ошибке НЕ должно эхо-отражать
+            # строку запроса (она может быть существующим internal_tracking
+            # или произвольным значением). Единый нейтральный текст делает
+            # ответы для existing internal_tracking и полностью неизвестного
+            # трека неразличимыми (Issue #69 — не раскрывать существование
+            # shipment и не отражать недоверенный ввод).
             raise NotFound(
-                f'Отправление с трек-номером «{tracking_number}» не найдено.'
+                'Отправление не найдено.'
             )

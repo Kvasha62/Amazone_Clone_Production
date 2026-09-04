@@ -274,19 +274,35 @@ class ShipmentTrackingByCodeAPITests(TestCase):
         )
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(response.data['error']['code'], 'not_found')
+        # API-04 canonical envelope: NotFound → error.code == "not_found",
+        # error.details содержит ровно один элемент (field: null).
+        error = response.data['error']
+        self.assertEqual(error['code'], 'not_found')
+        self.assertIsInstance(error['details'], list)
+        self.assertEqual(len(error['details']), 1)
+        self.assertIsNone(error['details'][0]['field'])
+        # Не раскрывается существование shipment.
+        self.assertNotIn(self.shipment.internal_tracking, error['message'])
+        self.assertNotIn(self.shipment.internal_tracking, error['details'][0]['message'])
 
     def test_track_unknown(self):
         """Полностью неизвестный трек → 404 + canonical not_found."""
         url = reverse('shipping:track-by-code', kwargs={'tracking': 'NOPE'})
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(response.data['error']['code'], 'not_found')
+        # API-04 canonical envelope identical to the internal_tracking case.
+        error = response.data['error']
+        self.assertEqual(error['code'], 'not_found')
+        self.assertIsInstance(error['details'], list)
+        self.assertEqual(len(error['details']), 1)
+        self.assertIsNone(error['details'][0]['field'])
 
     def test_track_internal_and_unknown_indistinguishable(self):
-        """Ответы для существующего internal_tracking и неизвестного трека
-        неразличимы с точки зрения API-контракта: одинаковый HTTP status и
-        одинаковый error.code, не раскрывается факт существования shipment."""
+        """Ответы для существующего internal_tracking и полностью неизвестного
+        трека неразличимы с точки зрения API-контракта (Issue #69):
+        одинаковый HTTP status и полный идентичный канонический `error`
+        envelope (code/message/details). `request_id` — операционный идентификатор
+        запроса и исключён из сравнения."""
         internal_url = reverse(
             'shipping:track-by-code',
             kwargs={'tracking': self.shipment.internal_tracking},
@@ -300,15 +316,11 @@ class ShipmentTrackingByCodeAPITests(TestCase):
 
         self.assertEqual(internal_resp.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(unknown_resp.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(
-            internal_resp.data['error']['code'],
-            unknown_resp.data['error']['code'],
-        )
-        # Ни один из них не раскрывает существование shipment.
+        # Полный `error` envelope совпадает — существование shipment не раскрывается.
+        self.assertEqual(internal_resp.data['error'], unknown_resp.data['error'])
+        # Оба случая — канонический not_found.
         self.assertEqual(internal_resp.data['error']['code'], 'not_found')
         self.assertEqual(unknown_resp.data['error']['code'], 'not_found')
-        self.assertEqual(len(internal_resp.data['error']['details']), 0)
-        self.assertEqual(len(unknown_resp.data['error']['details']), 0)
 
     def test_track_not_found(self):
         """404 для несуществующего трека."""
