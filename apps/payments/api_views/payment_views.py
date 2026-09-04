@@ -22,7 +22,6 @@
 # 📖 https://www.django-rest-framework.org/api-guide/views/
 # ────────────────────────────────────────────────────────────────────────
 
-import hashlib
 import hmac
 import logging
 
@@ -46,7 +45,12 @@ from apps.core.serializers import PaginationResponseSerializer
 
 from apps.orders.models import Order
 from apps.orders.models.order import OrderStatus
-from apps.payments.constants import PAYMENT_EVENT_ORDER_CONFIRM_FAILED
+from apps.payments.constants import (
+    PAYMENT_EVENT_ORDER_CONFIRM_FAILED,
+    WEBHOOK_NONCE_HEADER,
+    WEBHOOK_SIGNATURE_HEADER,
+    WEBHOOK_TIMESTAMP_HEADER,
+)
 from apps.payments.exceptions import OrderConfirmationError
 from apps.payments.models import Payment, PaymentEvent
 from apps.payments.serializers import (
@@ -58,6 +62,14 @@ from apps.payments.serializers import (
     RefundPaymentInputSerializer,
 )
 from apps.payments.services.payment_service import PaymentService
+from apps.payments.services.webhook_security import (
+    claim_webhook_nonce,
+    compute_webhook_signature,
+    is_fresh_webhook_timestamp,
+    is_valid_webhook_nonce,
+    is_valid_webhook_signature_format,
+    is_valid_webhook_timestamp,
+)
 
 # drf-spectacular — опциональная зависимость.
 try:
@@ -336,7 +348,9 @@ class PaymentCancelView(_PaymentViewMixin, APIView):
         description=(
             'Принимает уведомления от платёжного провайдера. '
             'AllowAny — запрос приходит без JWT. '
-            'Аутентификация через HMAC-SHA256 подпись (X-Webhook-Signature).'
+            'Аутентификация через HMAC-SHA256 (X-Webhook-Signature) '
+            'с защитой от replay: X-Webhook-Timestamp + X-Webhook-Nonce. '
+            'См. docs/api/API_CONTRACT.md §11.3 и ADR-004.'
         ),
         request=HandleWebhookInputSerializer,
         responses={200: PaymentSerializer},
@@ -348,59 +362,107 @@ class PaymentWebhookView(APIView):
 
     Приём вебхуков от платёжного провайдера.
 
-    БЕЗОПАСНОСТЬ:
+    БЕЗОПАСНОСТЬ (транспортная защита + replay protection, Issue #71):
       • AllowAny — провайдер отправляет запрос без JWT.
-      • HMAC-SHA256 подпись обязательна (X-Webhook-Signature header).
-      • Secret берётся из settings.PAYMENT_WEBHOOK_SECRET (env var).
-      • В DEBUG-режиме без секрета — webhook отклоняется (не молча работает).
+      • HMAC-SHA256 подпись обязательна (X-Webhook-Signature).
+        Подписывается не только body, а каноническая сборка:
+            timestamp || nonce || raw_body
+        (raw_body — исходные байты request.body).
+      • X-Webhook-Timestamp — Unix epoch (секунды), окно свежести ±300 с.
+      • X-Webhook-Nonce — одноразовый; фиксируется в БД в отдельной
+        (durable) транзакции; повтор nonce → отклонение (replay).
+      • Secret — settings.PAYMENT_WEBHOOK_SECRET (env var).
+      • Без секрета / без заголовков / невалидный формат / просроченный
+        timestamp / неверная подпись / повторный nonce → 403 (fail-closed).
       • Timing-safe сравнение (hmac.compare_digest).
+      • Security failure НЕ раскрывает причину: для клиента все отказы
+        идентичны (тот же canonical authentication error).
 
     ИДЕМПОТЕНТНОСТЬ:
-      Повторный вебхук обрабатывается корректно.
+      • Transport-level: timestamp + nonce — повтор той же подписи
+        невозможен (freshness + одноразовый nonce).
+      • Business-level: Payment.external_id — повторное бизнес-событие
+        того же платежа идемпотентно (см. handle_webhook).
     """
 
     permission_classes = (AllowAny,)
     authentication_classes = []  # Без аутентификации — внешний запрос
 
-    # Имя HTTP-заголовка с подписью
-    SIGNATURE_HEADER = 'X-Webhook-Signature'
+    # Имена HTTP-заголовков (контракт — см. constants).
+    TIMESTAMP_HEADER = WEBHOOK_TIMESTAMP_HEADER
+    NONCE_HEADER = WEBHOOK_NONCE_HEADER
+    SIGNATURE_HEADER = WEBHOOK_SIGNATURE_HEADER
 
-    def _verify_signature(self, request) -> bool:
+    @staticmethod
+    def _header(request, name: str):
+        """Доступ к HTTP-заголовку по имени (Django WSGI META)."""
+        meta_key = f'HTTP_{name.upper().replace("-", "_")}'
+        return request.META.get(meta_key)
+
+    def _verify_webhook_security(self, request) -> bool:
         """
-        Проверяет HMAC-SHA256 подпись вебхука.
+        Полный security pipeline webhook (Issue #71).
 
-        АЛГОРИТМ:
-          1. Получить PAYMENT_WEBHOOK_SECRET из settings
-          2. Получить X-Webhook-Signature из заголовков
-          3. Вычислить HMAC-SHA256(secret, request.body)
-          4. Сравнить timing-safe (hmac.compare_digest)
+        ПОРЯДОК (бизнес-логика НЕ выполняется до его успешного конца):
+          1. PAYMENT_WEBHOOK_SECRET задан              (fail-closed)
+          2. Прочитать timestamp, nonce, signature
+          3. Валидация формата timestamp (ASCII decimal int)
+          4. Валидация формата/длины nonce
+          5. Валидация формата signature (lowercase hex)
+          6. Свежесть timestamp: abs(now - ts) <= 300 с
+          7. HMAC-SHA256(secret, ts || nonce || raw_body)
+          8. Timing-safe сравнение (hmac.compare_digest)
+          9. Атомарная (race-safe) фиксация nonce в durable-транзакции
 
         ВОЗВРАЩАЕТ:
-          True — подпись валидна
-          False — подпись невалидна или отсутствует
+          True  — все security checks пройдены, nonce зафиксирован
+          False — любой отказ (secret/format/freshness/signature/replay)
 
-        🔴 НИКОГДА не логируем secret или signature.
+        🔴 НИКОГДА не логируем secret, signature, nonce, timestamp.
+        🔴 Для клиента причина отказа не различается (см. post()).
         """
+        # 1. Fail-closed: secret ОБЯЗАН быть задан (в production — env var).
         secret = getattr(settings, 'PAYMENT_WEBHOOK_SECRET', None)
         if not secret:
-            # В production секрет ОБЯЗАН быть задан.
-            # В development без секрета — отклоняем (не молча работаем).
             logger.warning('webhook_rejected_no_secret_configured')
             return False
 
-        signature = request.META.get(f'HTTP_{self.SIGNATURE_HEADER.upper().replace("-", "_")}')
-        if not signature:
-            logger.warning('webhook_rejected_missing_signature')
+        # 2. Прочитать заголовки.
+        timestamp = self._header(request, self.TIMESTAMP_HEADER)
+        nonce = self._header(request, self.NONCE_HEADER)
+        signature = self._header(request, self.SIGNATURE_HEADER)
+
+        # 3–5. Формат заголовков (отклоняем до сравнения подписи).
+        if not (
+            is_valid_webhook_timestamp(timestamp)
+            and is_valid_webhook_nonce(nonce)
+            and is_valid_webhook_signature_format(signature)
+        ):
+            # Не различаем, какой именно заголовок невалиден:
+            # для атакующего это не несёт полезной информации, а для
+            # клиента — единый canonical error.
+            logger.warning('webhook_rejected_invalid_header_format')
             return False
 
-        expected = hmac.new(
-            secret.encode('utf-8'),
-            request.body,
-            hashlib.sha256,
-        ).hexdigest()
+        # 6. Свежесть timestamp (±300 с).
+        if not is_fresh_webhook_timestamp(int(timestamp)):
+            logger.warning('webhook_rejected_stale_timestamp')
+            return False
 
+        # 7. Подпись по канонической сборке ts || nonce || raw_body.
+        expected = compute_webhook_signature(
+            secret, timestamp, nonce, request.body,
+        )
+
+        # 8. Timing-safe сравнение.
         if not hmac.compare_digest(signature, expected):
             logger.warning('webhook_rejected_invalid_signature')
+            return False
+
+        # 9. Атомарная (race-safe) фиксация nonce в DURABLE-транзакции.
+        #    Она НЕ откатывается вместе с бизнес-транзакцией ниже.
+        if not claim_webhook_nonce(nonce, int(timestamp)):
+            logger.warning('webhook_rejected_replay')
             return False
 
         return True
@@ -410,13 +472,21 @@ class PaymentWebhookView(APIView):
         POST /api/v1/payments/webhook/
 
         ПОТОК:
-          1. Проверка HMAC-SHA256 подписи (X-Webhook-Signature)
+          1. Security pipeline (secret, timestamp, nonce, signature,
+             freshness, HMAC, claim nonce) — до ВСЕЙ бизнес-логики.
           2. Валидация body (HandleWebhookInputSerializer)
           3. PaymentService.handle_webhook() — обработка
           4. Ответ 200 (провайдер ожидает 200 для подтверждения)
+
+        SECURITY FAILURE:
+          Любой отказ в шаге 1 → PermissionDenied с единым сообщением.
+          Для клиента все отказы (нет secret / нет заголовков /
+          невалидный формат / просроченный timestamp / неверная подпись /
+          повторный nonce) выглядят ИДЕНТИЧНО — canonical
+          authentication error, ничего не раскрывается.
         """
-        # ── HMAC-SHA256 аутентификация вебхука ──
-        if not self._verify_signature(request):
+        # ── Security pipeline (HMAC + timestamp + nonce + replay) ──
+        if not self._verify_webhook_security(request):
             raise PermissionDenied('Invalid payment webhook signature.')
 
         input_serializer = HandleWebhookInputSerializer(data=request.data)
