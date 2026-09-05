@@ -64,7 +64,16 @@ All newly-created `PriceHistory` records must persist the authoritative Accounti
 
 Removal of the legacy `Price.currency` authority requires a fail-closed migration preflight. Every existing Price amount must be shown to be compatible with the Accounting Currency of its commercial owner before the legacy field is removed.
 
-If any existing Price is incompatible, ambiguous, or cannot be established as compatible, the migration stops. Existing amounts are not silently rewritten and FX conversion is not permitted as a migration mechanism.
+The preflight must verify, for every existing Price, that:
+
+- the Product has an established commercial Store owner;
+- the Store resolves to a LegalEntity;
+- the LegalEntity has an Accounting Currency;
+- the legacy Price currency is known and equals that Accounting Currency.
+
+If any existing Price is incompatible, ambiguous, missing, or cannot be established as compatible, the migration stops. Existing amounts are not silently rewritten and FX conversion is not permitted as a migration mechanism.
+
+After a successful preflight, the legacy currency field may be removed because currency identity is then fully governed by the Currency Registry and the commercial ownership path.
 
 ## Historical invariants
 
