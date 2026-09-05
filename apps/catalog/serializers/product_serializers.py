@@ -196,13 +196,14 @@ class ProductListSerializer(serializers.ModelSerializer):
 
     АЛИГМЕНТ С ФРЕНДЕНДОМ (React):
         Frontend ProductListItem type ожидает:
-        - id (uuid в backend), name, slug
+        - id (UUID), name, slug
         - brand_name, primary_category_name
         - min_price, max_price, main_image
         - rating, reviews_count, is_featured, status
 
-        Backend использует uuid как публичный идентификатор,
-        frontend тип использует `id` — мы маппим uuid → id.
+        Публичный идентификатор товара — `id` типа UUID; внутреннее
+        модельное поле uuid маппится в него через source и отдельным
+        публичным полем НЕ отдаётся (F-8, #73).
         Backend поле main_image_url → frontend main_image.
         Backend category_name → frontend primary_category_name.
         Backend добавляет status для frontend.
@@ -241,20 +242,21 @@ class ProductListSerializer(serializers.ModelSerializer):
     # Frontend expects enum string: 'active', 'draft', etc.
     status = serializers.CharField(read_only=True)
 
-    # id — маппим uuid на id для frontend удобства.
-    # F-8 (#73): это НОРМАТИВНО — публичный идентификатор товара в API v1
-    # это UUID, и каталог отдаёт его как `id`. Целочисленный PK товара
-    # наружу не выходит. Дублирующее поле `uuid` отдаётся явно, чтобы
-    # клиенту не приходилось полагаться на «id здесь означает UUID».
+    # F-8 (#73): единственный публичный идентификатор товара — `id`,
+    # и его тип UUID (внутреннее модельное поле Product.uuid).
+    # Целочисленный PK наружу не выходит.
+    #
+    # Второго публичного поля `uuid` быть не должно: два ключа с одним и
+    # тем же значением — это два конкурирующих пространства
+    # идентификаторов на одном ресурсе, ровно то, что запрещает frozen
+    # contract. Модельное поле Product.uuid остаётся внутренним.
     id = serializers.UUIDField(source='uuid', read_only=True)
-    uuid = serializers.UUIDField(read_only=True)
 
     class Meta:
         model = Product
         # Поля для listing-карточки товара:
         fields = (
             'id',
-            'uuid',
             'name',
             'slug',
             'brand_name',
@@ -285,11 +287,11 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
     АЛИГМЕНТ С ФРЕНДЕНДОМ (React):
         Frontend ProductDetail type ожидает:
-        - id (uuid), name, slug, description
+        - id (UUID), name, slug, description
         - brand_name, primary_category_name
         - min_price, max_price, main_image
         - rating, reviews_count, is_featured, status
-        - uuid, manufacturer_code, meta_title, meta_description
+        - manufacturer_code, meta_title, meta_description
         - variants (ProductVariant[]), categories (Category[]), tags (Tag[])
         - created_at
 
@@ -297,6 +299,8 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         как вложенные объекты (Category[]).
     """
 
+    # F-8 (#73): `id` (UUID) — единственный публичный идентификатор;
+    # отдельного публичного поля `uuid` нет (см. ProductListSerializer).
     id = serializers.UUIDField(source='uuid', read_only=True)
     brand_name = serializers.CharField(source='brand.name', read_only=True)
     brand_slug = serializers.CharField(source='brand.slug', read_only=True)
@@ -345,7 +349,6 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         # Полный набор полей для карточки товара.
         fields = (
             'id',
-            'uuid',
             'name',
             'slug',
             'description',

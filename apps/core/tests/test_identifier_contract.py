@@ -177,11 +177,21 @@ class ProductIdentifierContractTests(CatalogTestCase):
         self.assertEqual(len(items), 1)
         return items[0]
 
-    def test_listing_id_is_uuid_and_uuid_field_matches(self):
+    def test_listing_id_is_uuid(self):
         item = self._listing_item()
         self.assertEqual(item['id'], str(self.product.uuid))
-        self.assertEqual(item['uuid'], str(self.product.uuid))
         self.assertIsNotNone(parse_uuid(item['id']))
+
+    def test_listing_has_no_second_public_uuid_field(self):
+        """F-8 (#73): у товара ровно ОДИН публичный идентификатор.
+
+        Проверяем не «id == uuid», а отсутствие второго ключа: пока в
+        payload есть и `id`, и `uuid` с одним значением, на ресурсе живут
+        два конкурирующих публичных пространства идентификаторов, и
+        клиенты неизбежно начнут использовать оба.
+        """
+        item = self._listing_item()
+        self.assertNotIn('uuid', item)
 
     def test_detail_id_is_uuid(self):
         url = reverse(
@@ -191,7 +201,28 @@ class ProductIdentifierContractTests(CatalogTestCase):
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['id'], str(self.product.uuid))
-        self.assertEqual(resp.data['uuid'], str(self.product.uuid))
+        self.assertIsNotNone(parse_uuid(resp.data['id']))
+
+    def test_detail_has_no_second_public_uuid_field(self):
+        """Деталка тоже отдаёт только `id` (F-8, #73)."""
+        url = reverse(
+            'catalog:product-detail',
+            kwargs={'identifier': str(self.product.uuid)},
+        )
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('uuid', resp.data)
+
+    def test_detail_by_slug_also_has_no_uuid_field(self):
+        """Тот же payload резолвится по slug — второго ключа нет и там."""
+        url = reverse(
+            'catalog:product-detail',
+            kwargs={'identifier': self.product.slug},
+        )
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['id'], str(self.product.uuid))
+        self.assertNotIn('uuid', resp.data)
 
     def test_integer_pk_never_leaks_as_product_id(self):
         item = self._listing_item()

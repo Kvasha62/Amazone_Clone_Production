@@ -457,7 +457,7 @@ drift between the two list endpoints is closed.
 | Address | `address_id` | `<int>` (BigAutoField PK) | Owner-scoped. |
 | Product (read) | `identifier` | `<str>` — **UUID or slug** | The view tries `uuid.UUID(identifier)`; on `ValueError` it falls back to slug lookup. |
 | Product (update) | `uuid` | `<uuid>` converter | UUID only; a non-UUID never matches the route → `404`. |
-| Product (payload / listing output) | `id` (+ `uuid`) | **UUID** | ✅ **Frozen by F-8 (#73).** `ProductListSerializer.id` / `ProductDetailSerializer.id` serialize the product **UUID**, and both payloads now also expose the same value explicitly as `uuid` so clients never have to rely on "`id` means UUID here". The integer PK of a product is never emitted. |
+| Product (payload / listing output) | `id` | **UUID** | ✅ **Frozen by F-8 (#73).** `ProductListSerializer.id` / `ProductDetailSerializer.id` serialize the product **UUID**, and that is the **only** public identifier in the payload. The model's internal `uuid` field is **not** exposed as a separate public field — two keys carrying one value would be two competing identifier spaces on one resource. The integer PK of a product is never emitted. |
 | Product (reviews filter / create) | `product_id` | **UUID** | ✅ **Frozen by F-8 (#73).** Reviews reference a product with exactly one key, `product_id`, typed as the product **UUID**. There is no `product_uuid` field. A malformed value → `400` (previously an empty result set); an integer PK → `400` (it was never a public identifier); a well-formed but unknown UUID → empty collection. |
 | Category / Brand / Tag | `slug` | `<slug>` converter (`[-a-zA-Z0-9_]+`) | SEO identifiers. |
 | Product variant | `variant_id` | `<int>` PK | Used by cart, wishlist, inventory, pricing. |
@@ -486,7 +486,8 @@ drift between the two list endpoints is closed.
 3. **Payment** — identity is `payment_number` (`PAY-000001`); the order
    reference is `order_number`; `external_id` is provider-side only.
 4. **Product** — the public identifier is the **UUID**. Catalog payloads keep
-   serializing it as `id` (normative, not a bug) and additionally expose `uuid`;
+   serializing it as `id` (normative, not a bug); the internal `uuid` model
+   field is not exposed as a second public identifier;
    reviews reference products by `product_id`, typed as UUID.
 5. **Deprecation window — `order_id` only.** The legacy `order_id` request
    field remains accepted so existing clients do not break; it is deprecated
@@ -754,7 +755,8 @@ non-staff. `400` on validation; `404` if a referenced brand or
 category does not exist. Slug and UUID are generated server-side. Not idempotent.
 
 **15. `GET /catalog/products/{identifier}/`** — Public. `identifier` is a UUID
-**or** a slug (§7). `200` → `ProductDetailSerializer`: `id` (**UUID**), `uuid`,
+**or** a slug (§7). `200` → `ProductDetailSerializer`: `id` (**UUID** — the
+only public product identifier; there is no separate `uuid` field),
 `name`, `slug`, `description`, `status`, brand/category denormalized fields,
 `main_image`, `categories`, `images[]`, `variants[]`, `tags`, `min_price`,
 `max_price`, `price_range`, `rating`, `display_rating`, `reviews_count`,
