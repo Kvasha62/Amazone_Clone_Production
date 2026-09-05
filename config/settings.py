@@ -249,6 +249,7 @@ INSTALLED_APPS = [
     "apps.wishlist",
     "apps.notifications",
     "apps.analytics",
+    "apps.currencies",
 ]
 
 # ── PostgreSQL: единственная поддерживаемая БД ──
