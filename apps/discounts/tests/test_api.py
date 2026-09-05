@@ -73,7 +73,7 @@ class CouponApplyAPITests(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['order_number'], self.order.order_number)
-        self.assertEqual(resp.data['discount'], '0.00')
+        self.assertEqual(Decimal(resp.data['discount']), Decimal('0'))
 
     def test_remove_requires_order_reference(self):
         """POST /discounts/remove/ без ссылки на заказ → 400."""
