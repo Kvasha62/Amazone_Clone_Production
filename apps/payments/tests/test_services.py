@@ -492,7 +492,7 @@ class GetPaymentByNumberTests(TestCase):
         user = create_test_user()
         order = create_test_order(user)
         payment = create_test_payment(order, user)
-        result = PaymentService.get_payment_by_number(payment.order_number)
+        result = PaymentService.get_payment_by_number(payment.payment_number)
         self.assertEqual(result.pk, payment.pk)
 
     def test_non_existing_payment(self):

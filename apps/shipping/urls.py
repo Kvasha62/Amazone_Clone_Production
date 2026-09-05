@@ -9,14 +9,14 @@
 #   POST   /api/v1/shipping/calculate/                   — расчёт стоимости
 #   GET    /api/v1/shipping/shipments/                   — список отправлений
 #   POST   /api/v1/shipping/shipments/                   — создать (staff)
-#   GET    /api/v1/shipping/shipments/{shipment}/            — детали
-#   PATCH  /api/v1/shipping/shipments/{shipment}/status/      — статус (staff)
-#   POST   /api/v1/shipping/shipments/{shipment}/tracking/    — трек-номер (staff)
+#   GET    /api/v1/shipping/shipments/{shipment_number}/          — детали
+#   PATCH  /api/v1/shipping/shipments/{shipment_number}/status/   — статус (staff)
+#   POST   /api/v1/shipping/shipments/{shipment_number}/tracking/ — трек (staff)
 #
 # ИДЕНТИФИКАТОР ОТПРАВЛЕНИЯ (F-8, issue #73):
-#   {shipment} — публичный internal_tracking (SHP-00000001).
-#   Числовой PK всё ещё принимается тем же маршрутом ради обратной
-#   совместимости, но считается устаревшим.
+#   {shipment_number} — канонический публичный идентификатор SHP-00000001.
+#   Целочисленный PK публичным маршрутом НЕ является.
+#   internal_tracking публичным идентификатором НЕ является.
 #   GET    /api/v1/shipping/track/{tracking}/            — отслеживание (public)
 #
 # 📖 https://docs.djangoproject.com/en/stable/topics/http/urls/
@@ -45,19 +45,19 @@ urlpatterns = [
     # ── Отправления ──
     path('shipments/', ShipmentListView.as_view(), name='shipment-list'),
     path('shipments/create/', ShipmentCreateView.as_view(), name='shipment-create'),
-    # <str:shipment> принимает публичный SHP-номер и (deprecated) числовой PK.
+    # <str:shipment_number> — канонический публичный номер SHP-00000001.
     path(
-        'shipments/<str:shipment>/',
+        'shipments/<str:shipment_number>/',
         ShipmentDetailView.as_view(),
         name='shipment-detail',
     ),
     path(
-        'shipments/<str:shipment>/status/',
+        'shipments/<str:shipment_number>/status/',
         ShipmentStatusView.as_view(),
         name='shipment-status',
     ),
     path(
-        'shipments/<str:shipment>/tracking/',
+        'shipments/<str:shipment_number>/tracking/',
         ShipmentTrackingView.as_view(),
         name='shipment-tracking',
     ),

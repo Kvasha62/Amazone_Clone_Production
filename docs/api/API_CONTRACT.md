@@ -303,7 +303,7 @@ list/object errors use indexed paths. Duplicate email/username on register,
 wrong `old_password`, missing `order_number` on coupon remove, and catalog query
 `min_price=abc` all use this shape with HTTP `400`.
 
-`POST /api/v1/reviews/` without `product_uuid`/`product_id` is a **validation**
+`POST /api/v1/reviews/` without `product_id` is a **validation**
 failure → `400` (G-29 closed). Unknown product remains `404`.
 
 ### 5.4 Authentication / authorization
@@ -458,17 +458,18 @@ drift between the two list endpoints is closed.
 | Product (read) | `identifier` | `<str>` — **UUID or slug** | The view tries `uuid.UUID(identifier)`; on `ValueError` it falls back to slug lookup. |
 | Product (update) | `uuid` | `<uuid>` converter | UUID only; a non-UUID never matches the route → `404`. |
 | Product (payload / listing output) | `id` (+ `uuid`) | **UUID** | ✅ **Frozen by F-8 (#73).** `ProductListSerializer.id` / `ProductDetailSerializer.id` serialize the product **UUID**, and both payloads now also expose the same value explicitly as `uuid` so clients never have to rely on "`id` means UUID here". The integer PK of a product is never emitted. |
-| Product (reviews filter / create) | `product_uuid` (canonical), `product_id` (deprecated) | UUID *or* int PK | ✅ **Frozen by F-8 (#73).** `product_uuid` is the canonical reference; `product_id` is accepted for one deprecation window. Supplying **both** → `400`. A malformed `product_uuid` → `400` (previously an empty result set). |
+| Product (reviews filter / create) | `product_id` | **UUID** | ✅ **Frozen by F-8 (#73).** Reviews reference a product with exactly one key, `product_id`, typed as the product **UUID**. There is no `product_uuid` field. A malformed value → `400` (previously an empty result set); an integer PK → `400` (it was never a public identifier); a well-formed but unknown UUID → empty collection. |
 | Category / Brand / Tag | `slug` | `<slug>` converter (`[-a-zA-Z0-9_]+`) | SEO identifiers. |
 | Product variant | `variant_id` | `<int>` PK | Used by cart, wishlist, inventory, pricing. |
 | Cart | none | — | Resolved from JWT user or session key. |
 | Cart item | `item_id` | `<int>` PK | Ownership checked in service. |
 | Order | `order_number` | `<str>`, format `ORD-` + zero-padded sequence (e.g. `ORD-000001`) | Public identifier; internal PK is never in the URL. |
 | Order (in payloads) | `order_number` (canonical), `order_id` (deprecated) | `<str>` `ORD-000001` *or* `<int>` PK | ✅ **Frozen by F-8 (#73).** `POST /payments/`, `POST /discounts/apply|remove/` and `POST /shipping/shipments/create/` accept `order_number` — the same public identifier used in every order URL. `order_id` (integer PK) is still accepted for one deprecation window. Supplying **both** → `400`; a malformed `order_number` → `400` (not `404`). Responses echo `order_number`. |
-| Payment | `payment_number` | `<str>`, format `PAY-` + zero-padded sequence (e.g. `PAY-000001`) | ⚠️ Stored in the model field literally named `order_number`; the URL kwarg is `payment_number`. Confusing but client-invisible. |
+| Payment | `payment_number` | `<str>`, format `PAY-` + zero-padded sequence (e.g. `PAY-000001`) | ✅ **Frozen by F-8 (#73).** Identity of the payment. The model field is now also named `payment_number` (was misleadingly `order_number`). Payloads expose `payment_number` (identity) **and** `order_number` (the referenced order) as two distinct keys. |
 | Payment (external) | `external_id` | provider string, unique | Webhook correlation key. |
-| Shipment | `internal_tracking` (canonical), integer PK (deprecated) | `<str>` `SHP-00000001` *or* `<int>` PK | ✅ **Frozen by F-8 (#73).** `/shipping/shipments/{shipment}/…` resolves the public `SHP-*` code; an all-digit segment is still resolved as the raw PK for one deprecation window. Any other value → canonical `404`. `internal_tracking` remains **not** a public tracking search key (F-4, #69) — it identifies a shipment only on the owner/staff-scoped shipment routes. |
-| Shipment tracking | `tracking` | `<str>` — external carrier `tracking_number` only | Public lookup matches **only** the external carrier `tracking_number`. The internal `SHP-*` (`internal_tracking`) code is an internal identifier and is **not** accepted as a public search key. |
+| Shipment | `shipment_number` | `<str>` `SHP-00000001` | ✅ **Frozen by F-8 (#73).** `/shipping/shipments/{shipment_number}/…` resolves **only** the canonical `SHP-*` number — a real, separate, immutable, sequence-generated column added in `shipping/0003_shipment_number`. An integer PK or an `internal_tracking` value → canonical `404`; neither was ever a public identifier, so neither gets a deprecation window. |
+| Shipment (`internal_tracking`) | — | `<str>` | **Internal only.** Never a path identifier and never serialized in a public response. |
+| Shipment (`tracking_number`) | `tracking` (public tracking route) | `<str>` — external carrier code | The **external** carrier tracking code, distinct from `shipment_number`. The public `/track/{tracking}/` lookup matches **only** this field (F-4, #69); neither `shipment_number` nor `internal_tracking` is accepted there, since that route is anonymous. |
 | Review | `review_id` | `<int>` PK | |
 | Notification | `pk` | `<int>` PK | |
 | Wishlist item | `item_id` | `<int>` PK | |
@@ -478,23 +479,28 @@ drift between the two list endpoints is closed.
 
 1. **Order** — the public identifier is `order_number` (`ORD-000001`), in paths
    *and* in request bodies. The integer PK is internal.
-2. **Shipment** — the public identifier is `internal_tracking`
-   (`SHP-00000001`). The integer PK is internal.
-3. **Product** — the public identifier is the **UUID**. Catalog payloads keep
+2. **Shipment** — the public identifier is `shipment_number`
+   (`SHP-00000001`), a dedicated immutable column. `internal_tracking` is
+   internal and never public; `tracking_number` is the external carrier code.
+   The integer PK is internal.
+3. **Payment** — identity is `payment_number` (`PAY-000001`); the order
+   reference is `order_number`; `external_id` is provider-side only.
+4. **Product** — the public identifier is the **UUID**. Catalog payloads keep
    serializing it as `id` (normative, not a bug) and additionally expose `uuid`;
-   reviews reference products by `product_uuid`.
-4. **Deprecation window.** The legacy integer references — the `order_id` and
-   `product_id` request fields, and an all-digit shipment path segment — remain
-   accepted so existing clients do not break, but they are deprecated and will
-   be removed in a future API version. Passing a canonical identifier *and* its
-   legacy integer counterpart in the same request is a `400`, so there is never
-   an ambiguity about which one won.
-5. Responses always carry the public identifier
-   (`order_number`, `internal_tracking`, `product_uuid` / `uuid`); the legacy
-   integer fields that are already in payloads (`order_id` in the discounts
-   mini-payload, `id` on shipments, `product_id` on reviews) stay for the same
-   deprecation window.
-6. **Parsing is ASCII-strict.** `ORD-`/`SHP-` patterns and the legacy integer
+   reviews reference products by `product_id`, typed as UUID.
+5. **Deprecation window — `order_id` only.** The legacy `order_id` request
+   field remains accepted so existing clients do not break; it is deprecated
+   and will be removed in a future API version. Passing `order_number` *and*
+   `order_id` in the same request is a `400`, so there is never an ambiguity
+   about which one won. No other legacy integer reference is accepted: an
+   integer shipment path segment (`404`) and an integer `product_id` (`400`)
+   were never public identifiers, and honouring them would recreate the
+   enumerable second addressing scheme this contract removes.
+6. Responses always carry the public identifier (`order_number`,
+   `shipment_number`, `payment_number`, `product_id` / `uuid`). The only
+   legacy field still emitted is `order_id` in the discounts mini-payload,
+   for the same deprecation window.
+7. **Parsing is ASCII-strict.** `ORD-`/`SHP-` patterns and the legacy integer
    parser match `[0-9]` only (never `\d` / `str.isdigit()`, which also accept
    non-ASCII digits), and a legacy PK must be a positive `bigint`. Values that
    cannot identify a row yield the canonical `404` and never reach `int()` or
@@ -990,30 +996,29 @@ Query parameters (parsed by hand, not by a serializer ⚠️ **GAP**):
 
 | Param | Behaviour |
 |---|---|
-| `product_uuid` | **Canonical** (F-8, #73). UUID; malformed → `400 {"product_uuid": …}`; valid but unknown → empty canonical envelope. |
-| `product_id` | **Deprecated** (F-8, #73) integer PK; non-numeric → `400 {"product_id": …}`. Supplying it together with `product_uuid` → `400`. |
+| `product_id` | **Canonical and only** product reference (F-8, #73). The product **UUID**; malformed → `400 {"product_id": …}`; an integer PK → `400` (never a public identifier); valid but unknown → empty canonical envelope. There is no `product_uuid` parameter. |
 | `user_id` | int. For authenticated non-staff callers, their own id is allowed; a different id returns `404` with the canonical API-04 `not_found` envelope. Staff callers may filter by any id. Anonymous callers get the canonical empty envelope, not a bare array. |
 | `rating`, `rating_gte`, `rating_lte` | int; non-numeric → `400`. No 1–5 range enforcement on `rating_gte`/`rating_lte`. |
 | `verified` | truthy tokens `true`/`1`/`yes` only; anything else is ignored. |
 | `ordering` | `rating`, `-rating`, `created_at`, `-created_at`, `helpful`; invalid values fall back to `-created_at` silently ⚠️ **GAP**. |
 | `page`, `page_size` | API-05 semantics (§6.2); invalid values → `400` canonical envelope (no `500`). |
 
-Default scope when neither `product_id`, `product_uuid` nor `user_id` is given:
+Default scope when neither `product_id` nor `user_id` is given:
 the caller's own reviews (authenticated) or the canonical empty envelope
 (anonymous). Only approved reviews are listed. Response items are
-`ReviewListSerializer` (`id`, `user_id`, `user_email`, `product_uuid`,
-`product_id` (deprecated), `rating`,
+`ReviewListSerializer` (`id`, `user_id`, `user_email`, `product_id` (UUID),
+`rating`,
 `title`, `verified_purchase`, `helpful_yes`, `helpful_no`, `helpful_score`,
 `my_vote`, `created_at`); `my_vote` is populated only for authenticated
 callers. `ordering=helpful` is performed in the database (annotated score) with
 deterministic ties and returns the same canonical envelope as every other
 ordering.
 
-**48. `POST /reviews/`** — Auth. Body `product_uuid` (canonical) **or**
-`product_id` (deprecated integer PK) — exactly one of them (F-8, #73) —
-plus `rating` (1–5), `text`, `title?`. `201` → `ReviewSerializer`, which carries
-`product_uuid`. Unknown product → `404`; neither identifier supplied, or **both**
-supplied → **`400`** validation envelope.
+**48. `POST /reviews/`** — Auth. Body `product_id` — the product **UUID**,
+the only accepted product reference (F-8, #73) — plus `rating` (1–5), `text`,
+`title?`. `201` → `ReviewSerializer`, which carries `product_id` as a UUID.
+Unknown product → `404`; missing `product_id`, a malformed UUID, or an integer
+PK → **`400`** validation envelope.
 Duplicate review by the same user for the same product → `400` from the service.
 
 **49–51. `/reviews/{review_id}/`.** `GET` is public but an unapproved review is
@@ -1091,10 +1096,11 @@ items. Staff see **all** shipments; other users see only their own. Paginated.
 `order_number` (canonical; integer `order_id` deprecated but accepted, both
 together → `400` — F-8, #73), `method_id`, `weight_kg?`, `notes?` → `201`
 `ShipmentDetailSerializer`. `404` for an unknown order or method.
-**61.** `200` → `ShipmentDetailSerializer`. `{shipment}` is the public
-`internal_tracking` code (`SHP-00000001`); an all-digit segment is still
-resolved as the raw integer PK for one deprecation window, and any other value
-yields the canonical `404` (F-8, #73). A non-staff caller asking for
+**61.** `200` → `ShipmentDetailSerializer`. `{shipment_number}` is the
+canonical public `shipment_number` (`SHP-00000001`). An integer PK, an
+`internal_tracking` value, or any other malformed segment yields the canonical
+`404` — neither was ever a public identifier, so neither has a deprecation
+window (F-8, #73). A non-staff caller asking for
 someone else's shipment gets `404 {"detail": "Отправление не найдено."}` (§10).
 **62.** Staff. Body `{"status": str, "tracking_number": str?}` → `200`.
 `status` is a plain `CharField` here (not a `ChoiceField`), so the valid set is
@@ -1103,14 +1109,15 @@ enforced only by the service FSM ⚠️ **GAP**. Illegal transition → `400`.
 Idempotent (absolute set). Note this is a `POST` that sets a single field,
 whereas #62 uses `PATCH` ⚠️ **GAP (method semantics)**.
 **64.** **Public** (`permission_classes = ()` — no authentication at all).
-`tracking` matches **only** the carrier `tracking_number`. The internal
-`SHP-XXXXXXXX` code (`internal_tracking`) is an internal identifier and is
-**not** accepted as a public search key. `200` → `ShipmentTrackingSerializer`
-(`internal_tracking`, `tracking_number`, `status`, `status_display`,
-`method_name`, `estimated_days_display`, `shipped_at`, `created_at`) —
+`tracking` matches **only** the carrier `tracking_number`. Neither the public
+`shipment_number` nor the internal `internal_tracking` is accepted as a search
+key here, because this route is anonymous. `200` → `ShipmentTrackingSerializer`
+(`tracking_number`, `status`, `status_display`,
+`method_name`, `estimated_days_display`, `shipped_at`, `created_at`) — note
+`internal_tracking` is **not** in the payload (F-8, #73) —
 deliberately minimal, no customer or address data. `404` if not found.
 ✅ **CLOSED (Issue #69 / F-4):** the public endpoint no longer resolves by the
-sequential, guessable `SHP-*` code. A valid existing `internal_tracking` and a
+sequential, guessable `SHP-*` code. A valid existing internal identifier and a
 fully unknown tracking both return the canonical `404 not_found` with an
 identical envelope, so shipment existence is not leaked. The endpoint remains
 exempt from per-user throttling (anonymous rate only).
@@ -1481,7 +1488,7 @@ the API-02…API-07 scope statements.
 | G-11 | Unauthenticated `/api/v1/schema/` and `/api/v1/docs/` in production | §9.15 | **API-02** |
 | G-12 | Optional `drf_spectacular` imports make schema generation best-effort; no committed artifact, no CI validation | §12 | **API-02** |
 | G-13 | `int()` on `page`/`page_size` (reviews) and `limit` (analytics) without try/except → `500` on non-numeric input | §9.8, §9.13 | `page`/`page_size` closed by API-05; analytics `limit` remains **[F-1 (#66)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)** |
-| G-14 | Reviews list query parameters are hand-parsed; `ordering` and `product_uuid` fail silently instead of `400` | §9.8 | **API-05** (with [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)) |
+| G-14 | Reviews list query parameters are hand-parsed; `ordering` and `product_id` fail silently instead of `400` | §9.8 | **API-05** (with [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66)) |
 | G-15 | `?ordering=` invalid value silently falls back on catalog listing; `is_featured`/`status` query params are inert | §9.2 | **API-05** |
 | G-16 | `GET /reviews/?user_id=<other>` silently rewrites to the caller's id | §9.8, §10 | **Closed by [#67](https://github.com/Kvasha62/Amazone_Clone_Production/issues/67)** — non-staff callers now receive canonical `404` / `not_found` |
 | G-18 | Public `/shipping/track/{tracking}/` is enumerable via sequential `SHP-` codes | §9.10 | **Closed by [F-4 (#69)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/69)** — public lookup now uses `tracking_number` only; `internal_tracking` is not a public key |

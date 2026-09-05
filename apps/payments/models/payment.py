@@ -133,7 +133,7 @@ class Payment(BaseModel):
     # Формат: PAY-000001, PAY-000123 и т.д.
     # unique=True → UniqueConstraint + B-tree индекс.
     # editable=False — генерируется автоматически.
-    order_number = models.CharField(
+    payment_number = models.CharField(
         verbose_name='Номер платежа',
         max_length=20,
         unique=True,
@@ -141,7 +141,7 @@ class Payment(BaseModel):
         blank=True,
     )
 
-    # Внутренний числовой счётчик для генерации order_number.
+    # Внутренний числовой счётчик для генерации payment_number.
     # Аналог Order._order_number_seq — для быстрого MAX().
     _payment_number_seq = models.PositiveBigIntegerField(
         editable=False,
@@ -371,7 +371,7 @@ class Payment(BaseModel):
 
     def __str__(self):
         return (
-            f'{self.order_number} ({self.get_status_display()}) — '
+            f'{self.payment_number} ({self.get_status_display()}) — '
             f'{self.amount}₽'
         )
 
@@ -403,15 +403,15 @@ class Payment(BaseModel):
 
     def save(self, *args, **kwargs):
         """
-        Переопределённый save() — авто-генерация order_number.
+        Переопределённый save() — авто-генерация payment_number.
         Аналог Order.save() — генерируем PAY-000001.
         """
-        if not self.order_number:
+        if not self.payment_number:
             max_seq = Payment.objects.aggregate(
                 max_seq=models.Max('_payment_number_seq'),
             )['max_seq'] or 0
             self._payment_number_seq = max_seq + 1
-            self.order_number = (
+            self.payment_number = (
                 f'{PAYMENT_NUMBER_PREFIX}-'
                 f'{self._payment_number_seq:0{PAYMENT_NUMBER_DIGITS}d}'
             )

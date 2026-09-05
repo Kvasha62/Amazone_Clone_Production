@@ -70,7 +70,7 @@ class PaymentListAPITests(TestCase):
         }
         resp = self.client.post(self.url, data, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertIn('order_number', resp.data)
+        self.assertIn('payment_number', resp.data)
         self.assertEqual(resp.data['status'], 'pending')
         # Платёж реально создан: заказ/пользователь/сумма/событие корректны.
         payment = Payment.objects.get(pk=resp.data['id'])
@@ -84,7 +84,7 @@ class PaymentListAPITests(TestCase):
 
     @override_settings(DEFAULT_THROTTLE_CLASSES=[])
     def test_create_payment_by_order_number(self):
-        """F-8 (#73): канонический order_number принимается."""
+        """F-8 (#73): канонический order_number заказа принимается."""
         self.client.force_authenticate(self.user)
         data = {
             'order_number': self.order.order_number,
@@ -329,7 +329,7 @@ class PaymentDetailAPITests(TestCase):
         self.client.force_authenticate(self.user)
         url = reverse(
             'payments:payment-detail',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -342,7 +342,7 @@ class PaymentDetailAPITests(TestCase):
         self.client.force_authenticate(other_user)
         url = reverse(
             'payments:payment-detail',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
@@ -351,7 +351,7 @@ class PaymentDetailAPITests(TestCase):
         """Без аутентификации → 401."""
         url = reverse(
             'payments:payment-detail',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -374,7 +374,7 @@ class PaymentRefundAPITests(TestCase):
         self.client.force_authenticate(self.staff_user)
         url = reverse(
             'payments:payment-refund',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.post(url, {'reason': 'Брак'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -386,7 +386,7 @@ class PaymentRefundAPITests(TestCase):
         self.client.force_authenticate(self.user)
         url = reverse(
             'payments:payment-refund',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.post(url, {'reason': 'Test'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
@@ -396,7 +396,7 @@ class PaymentRefundAPITests(TestCase):
         self.client.force_authenticate(self.staff_user)
         url = reverse(
             'payments:payment-refund',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.post(
             url, {'amount': '300.00', 'reason': 'Partial'}, format='json',
@@ -423,7 +423,7 @@ class PaymentCancelAPITests(TestCase):
         self.client.force_authenticate(self.user)
         url = reverse(
             'payments:payment-cancel',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.post(url, {'reason': 'Передумал'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -436,7 +436,7 @@ class PaymentCancelAPITests(TestCase):
         self.client.force_authenticate(other_user)
         url = reverse(
             'payments:payment-cancel',
-            kwargs={'payment_number': self.payment.order_number},
+            kwargs={'payment_number': self.payment.payment_number},
         )
         resp = self.client.post(url, format='json')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

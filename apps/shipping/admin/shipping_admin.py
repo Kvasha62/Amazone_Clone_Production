@@ -74,19 +74,20 @@ class ShipmentAdmin(ProtectedFieldsAdminMixin, admin.ModelAdmin):
     )
 
     list_display = (
-        'id', 'internal_tracking', 'tracking_number',
+        'id', 'shipment_number', 'internal_tracking', 'tracking_number',
         'order', 'status', 'shipping_cost',
         'shipped_at', 'delivered_at',
     )
     list_filter = ('status', 'method__shipping_type')
     search_fields = (
-        'internal_tracking', 'tracking_number',
+        'shipment_number', 'internal_tracking', 'tracking_number',
         'order__order_number',
     )
     raw_id_fields = ('order', 'user', 'method')
     list_per_page = 50
     ordering = ('-created_at',)
     readonly_fields = (
+        'shipment_number', '_shipment_number_seq',
         'internal_tracking', '_tracking_seq',
         # PROD-004 (F-06): жизненный цикл отправления — только чтение.
         'status', 'shipped_at', 'delivered_at',

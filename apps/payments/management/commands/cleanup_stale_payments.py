@@ -79,7 +79,7 @@ class Command(BaseCommand):
             for p in stale_payments:
                 cancelled_ids.append({
                     'id': p.pk,
-                    'order_number': p.order_number,
+                    'payment_number': p.payment_number,
                     'amount': str(p.amount),
                     'created_at': p.created_at.isoformat(),
                 })
@@ -93,14 +93,14 @@ class Command(BaseCommand):
                     )
                     cancelled_ids.append({
                         'id': payment.pk,
-                        'order_number': payment.order_number,
+                        'payment_number': payment.payment_number,
                     })
                 except (ValidationError, ObjectDoesNotExist) as exc:
                     # Ожидаемые доменные/not-found сбои одного платежа
                     # логируются и не останавливают обработку остальных.
                     # Неожиданные ошибки (БД, программные) пробрасываются.
                     self.stderr.write(
-                        f'Ошибка отмены платежа {payment.order_number}: {exc}'
+                        f'Ошибка отмены платежа {payment.payment_number}: {exc}'
                     )
 
             msg = f'Отменено {len(cancelled_ids)} зависших платежей.'

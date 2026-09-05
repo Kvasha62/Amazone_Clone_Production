@@ -115,7 +115,7 @@ class _PaymentViewMixin:
         try:
             payment = Payment.objects.select_related(
                 'order', 'user',
-            ).get(order_number=payment_number)
+            ).get(payment_number=payment_number)
         except Payment.DoesNotExist:
             raise NotFound('Платёж не найден.')
 
@@ -176,8 +176,8 @@ class PaymentListView(_PaymentViewMixin, APIView):
         ПОТОК:
           1. Валидация body (CreatePaymentInputSerializer)
           2. Получение заказа с owner scoping (Issue #68 / API-01 F-3)
-             по публичному order_number (F-8 / #73) либо по устаревшему
-             order_id
+             по публичному order_number заказа (F-8 / #73) либо по
+             устаревшему order_id
           3. Определение суммы (из body или из заказа)
           4. PaymentService.create_payment() — бизнес-логика
           5. Сериализация и ответ (201 CREATED)
@@ -286,7 +286,7 @@ class PaymentRefundView(APIView):
           4. Сериализация и ответ
         """
         try:
-            payment = Payment.objects.get(order_number=payment_number)
+            payment = Payment.objects.get(payment_number=payment_number)
         except Payment.DoesNotExist:
             raise NotFound('Платёж не найден.')
 

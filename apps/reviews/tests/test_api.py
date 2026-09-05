@@ -40,44 +40,43 @@ class ReviewListPublicTests(CatalogTestCase):
         )
 
     def test_list_without_auth(self):
-        resp = self.client.get(self.url, {'product_id': self.product.pk})
+        resp = self.client.get(self.url, {'product_id': str(self.product.uuid)})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn('results', resp.data)
         self.assertEqual(resp.data['count'], 2)
 
-    def test_list_by_product_uuid(self):
-        resp = self.client.get(self.url, {'product_uuid': str(self.product.uuid)})
+    def test_list_by_product_id_uuid(self):
+        """F-8 (#73): product_id — UUID товара, единственный ключ ссылки."""
+        resp = self.client.get(self.url, {'product_id': str(self.product.uuid)})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 2)
-        # F-8 (#73): payload отдаёт публичный UUID товара.
         self.assertEqual(
-            resp.data['results'][0]['product_uuid'], str(self.product.uuid),
+            resp.data['results'][0]['product_id'], str(self.product.uuid),
         )
+        # Конкурирующего product_uuid в контракте нет.
+        self.assertNotIn('product_uuid', resp.data['results'][0])
 
-    def test_list_rejects_both_product_identifiers(self):
-        """product_uuid + product_id одновременно → 400 (F-8, #73)."""
-        resp = self.client.get(self.url, {
-            'product_uuid': str(self.product.uuid),
-            'product_id': self.product.pk,
-        })
+    def test_list_rejects_integer_product_id(self):
+        """Целочисленный PK товара публичным идентификатором не является."""
+        resp = self.client.get(self.url, {'product_id': self.product.pk})
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_list_malformed_product_uuid_returns_400(self):
-        """Некорректный product_uuid → 400, а не тихий пустой список."""
-        resp = self.client.get(self.url, {'product_uuid': 'not-a-uuid'})
+    def test_list_malformed_product_id_returns_400(self):
+        """Некорректный product_id → 400, а не тихий пустой список."""
+        resp = self.client.get(self.url, {'product_id': 'not-a-uuid'})
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_list_unknown_product_uuid_returns_empty(self):
+    def test_list_unknown_product_id_returns_empty(self):
         """Валидный, но неизвестный UUID → пустая коллекция."""
         resp = self.client.get(self.url, {
-            'product_uuid': '00000000-0000-4000-8000-000000000000',
+            'product_id': '00000000-0000-4000-8000-000000000000',
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 0)
 
     def test_list_filter_by_rating(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'rating': 5,
+            'product_id': str(self.product.uuid), 'rating': 5,
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 1)
@@ -85,28 +84,28 @@ class ReviewListPublicTests(CatalogTestCase):
 
     def test_list_filter_by_rating_gte(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'rating_gte': 4,
+            'product_id': str(self.product.uuid), 'rating_gte': 4,
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 1)
 
     def test_list_filter_by_rating_lte(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'rating_lte': 3,
+            'product_id': str(self.product.uuid), 'rating_lte': 3,
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 1)
 
     def test_list_filter_verified(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'verified': 'true',
+            'product_id': str(self.product.uuid), 'verified': 'true',
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 0)
 
     def test_list_sort_by_rating_desc(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'ordering': '-rating',
+            'product_id': str(self.product.uuid), 'ordering': '-rating',
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         ratings = [r['rating'] for r in resp.data['results']]
@@ -114,7 +113,7 @@ class ReviewListPublicTests(CatalogTestCase):
 
     def test_list_sort_by_rating_asc(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'ordering': 'rating',
+            'product_id': str(self.product.uuid), 'ordering': 'rating',
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         ratings = [r['rating'] for r in resp.data['results']]
@@ -122,14 +121,14 @@ class ReviewListPublicTests(CatalogTestCase):
 
     def test_list_sort_by_helpful(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'ordering': 'helpful',
+            'product_id': str(self.product.uuid), 'ordering': 'helpful',
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['count'], 2)
 
     def test_list_pagination(self):
         resp = self.client.get(self.url, {
-            'product_id': self.product.pk, 'page': 1, 'page_size': 1,
+            'product_id': str(self.product.uuid), 'page': 1, 'page_size': 1,
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data['results']), 1)
@@ -226,7 +225,7 @@ class ReviewListPublicTests(CatalogTestCase):
         self.r5.save(update_fields=['helpful_yes'])
 
         self.client.force_authenticate(voter)
-        resp = self.client.get(self.url, {'product_id': self.product.pk})
+        resp = self.client.get(self.url, {'product_id': str(self.product.uuid)})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         results = resp.data['results']
         # Находим r5 в результатах
@@ -246,51 +245,42 @@ class ReviewCreateAPITests(CatalogTestCase):
         self.url = reverse('reviews:review-list')
 
     def test_create_requires_auth(self):
-        data = {'product_id': self.product.pk, 'rating': 4, 'text': 'Отличный!'}
+        data = {'product_id': str(self.product.uuid), 'rating': 4, 'text': 'Отличный!'}
         resp = self.client.post(self.url, data, format='json')
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_create_review(self):
         self.client.force_authenticate(self.user)
-        data = {'product_id': self.product.pk, 'rating': 4, 'text': 'Отличный телефон!'}
+        data = {'product_id': str(self.product.uuid), 'rating': 4, 'text': 'Отличный телефон!'}
         resp = self.client.post(self.url, data, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertEqual(resp.data['rating'], 4)
 
-    def test_create_review_with_uuid(self):
+    def test_create_rejects_integer_product_id(self):
+        """Целочисленный PK товара в теле → 400 (F-8, #73)."""
         self.client.force_authenticate(self.user)
         data = {
-            'product_uuid': str(self.product.uuid),
-            'rating': 5, 'text': 'Замечательный товар!',
-        }
-        resp = self.client.post(self.url, data, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-
-    def test_create_rejects_both_product_identifiers(self):
-        """product_uuid + product_id одновременно → 400 (F-8, #73)."""
-        self.client.force_authenticate(self.user)
-        data = {
-            'product_uuid': str(self.product.uuid),
             'product_id': self.product.pk,
             'rating': 5, 'text': 'Замечательный товар!',
         }
         resp = self.client.post(self.url, data, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_create_response_exposes_product_uuid(self):
-        """Ответ содержит публичный product_uuid (F-8, #73)."""
+    def test_create_response_exposes_product_id_as_uuid(self):
+        """Ответ содержит product_id = UUID товара, без product_uuid."""
         self.client.force_authenticate(self.user)
         data = {
-            'product_uuid': str(self.product.uuid),
+            'product_id': str(self.product.uuid),
             'rating': 5, 'text': 'Замечательный товар!',
         }
         resp = self.client.post(self.url, data, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data['product_uuid'], str(self.product.uuid))
+        self.assertEqual(resp.data['product_id'], str(self.product.uuid))
+        self.assertNotIn('product_uuid', resp.data)
 
     def test_create_duplicate_fails(self):
         self.client.force_authenticate(self.user)
-        data = {'product_id': self.product.pk, 'rating': 4, 'text': 'Отличный!'}
+        data = {'product_id': str(self.product.uuid), 'rating': 4, 'text': 'Отличный!'}
         self.client.post(self.url, data, format='json')
         resp = self.client.post(self.url, data, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

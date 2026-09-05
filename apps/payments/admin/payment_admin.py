@@ -56,7 +56,7 @@ class PaymentAdmin(admin.ModelAdmin):
     Админка для платежей.
 
     ОСНОВНЫЕ КОЛОНКИ:
-      • order_number — PAY-000001
+      • payment_number — PAY-000001
       • order — ссылка на заказ
       • status — текущий статус
       • amount — сумма
@@ -69,7 +69,7 @@ class PaymentAdmin(admin.ModelAdmin):
     """
 
     list_display = (
-        'order_number',
+        'payment_number',
         'order',
         'user',
         'status',
@@ -89,14 +89,14 @@ class PaymentAdmin(admin.ModelAdmin):
     )
 
     search_fields = (
-        'order_number',
+        'payment_number',
         'external_id',
         'order__order_number',
         'user__email',
     )
 
     readonly_fields = (
-        'order_number',
+        'payment_number',
         'order',
         'user',
         'status',
@@ -115,7 +115,7 @@ class PaymentAdmin(admin.ModelAdmin):
     )
 
     fields = (
-        'order_number',
+        'payment_number',
         'order',
         'user',
         'status',

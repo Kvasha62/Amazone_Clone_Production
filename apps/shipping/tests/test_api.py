@@ -219,27 +219,43 @@ class ShipmentDetailAPITests(TestCase):
         """Успешное получение деталей."""
         url = reverse(
             'shipping:shipment-detail',
-            kwargs={'shipment': self.shipment.internal_tracking},
-        )
-        response = self.client.get(url)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['internal_tracking'], self.shipment.internal_tracking)
-
-    def test_detail_by_legacy_pk_still_works(self):
-        """DEPRECATED: числовой PK в пути всё ещё резолвится (F-8, #73)."""
-        url = reverse(
-            'shipping:shipment-detail', kwargs={'shipment': str(self.shipment.pk)},
+            kwargs={'shipment_number': self.shipment.shipment_number},
         )
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
-            response.data['internal_tracking'], self.shipment.internal_tracking,
+            response.data['shipment_number'], self.shipment.shipment_number,
         )
+        # internal_tracking — внутреннее поле, наружу не отдаётся (F-8, #73).
+        self.assertNotIn('internal_tracking', response.data)
+
+    def test_detail_by_integer_pk_returns_404(self):
+        """Целочисленный PK НЕ адресует отправление публично (F-8, #73).
+
+        В отличие от order_id, PK отправления никогда не был публичным
+        идентификатором, поэтому окна совместимости для него нет:
+        перечисление по /shipments/1/ должно давать 404.
+        """
+        url = reverse(
+            'shipping:shipment-detail',
+            kwargs={'shipment_number': str(self.shipment.pk)},
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_detail_by_internal_tracking_returns_404(self):
+        """internal_tracking не является публичным адресом (F-8, #73)."""
+        url = reverse(
+            'shipping:shipment-detail',
+            kwargs={'shipment_number': self.shipment.internal_tracking},
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_detail_garbage_identifier_returns_404(self):
         """Мусорный идентификатор → канонический 404, а не 500."""
         url = reverse(
-            'shipping:shipment-detail', kwargs={'shipment': 'not-an-id'},
+            'shipping:shipment-detail', kwargs={'shipment_number': 'not-an-id'},
         )
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -275,7 +291,7 @@ class ShipmentDetailAPITests(TestCase):
     def test_detail_not_found(self):
         """NotFound для несуществующего отправления."""
         url = reverse(
-            'shipping:shipment-detail', kwargs={'shipment': 'SHP-09999999'},
+            'shipping:shipment-detail', kwargs={'shipment_number': 'SHP-09999999'},
         )
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -296,7 +312,7 @@ class ShipmentStatusAPITests(TestCase):
         """Успешный переход статуса."""
         url = reverse(
             'shipping:shipment-status',
-            kwargs={'shipment': self.shipment.internal_tracking},
+            kwargs={'shipment_number': self.shipment.shipment_number},
         )
         data = {'status': 'in_transit'}
         response = self.client.patch(url, data, format='json')
@@ -307,7 +323,7 @@ class ShipmentStatusAPITests(TestCase):
         """Недопустимый переход → 400."""
         url = reverse(
             'shipping:shipment-status',
-            kwargs={'shipment': self.shipment.internal_tracking},
+            kwargs={'shipment_number': self.shipment.shipment_number},
         )
         data = {'status': 'delivered'}  # preparing → delivered: invalid
         response = self.client.patch(url, data, format='json')
@@ -329,7 +345,7 @@ class ShipmentTrackingAPITests(TestCase):
         """Успешное обновление трек-номера."""
         url = reverse(
             'shipping:shipment-tracking',
-            kwargs={'shipment': self.shipment.internal_tracking},
+            kwargs={'shipment_number': self.shipment.shipment_number},
         )
         data = {'tracking_number': 'TRACK-99999'}
         response = self.client.post(url, data, format='json')
@@ -361,7 +377,10 @@ class ShipmentTrackingByCodeAPITests(TestCase):
         self.assertEqual(response.data['tracking_number'], 'EXT-12345')
         # Возвращается shipment tracking information.
         self.assertEqual(response.data['status'], self.shipment.status)
-        self.assertEqual(response.data['internal_tracking'], self.shipment.internal_tracking)
+        self.assertNotIn('internal_tracking', response.data)
+        self.assertEqual(
+            response.data['tracking_number'], self.shipment.tracking_number,
+        )
 
     def test_track_by_internal_not_accepted(self):
         """Внутренний internal_tracking не принимается публичным endpoint."""

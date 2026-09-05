@@ -3,8 +3,8 @@
 #
 # ПРОВЕРЯЕТ:
 #   • Создание платежа с валидными данными
-#   • Авто-генерация order_number
-#   • Уникальность order_number
+#   • Авто-генерация payment_number
+#   • Уникальность payment_number
 #   • CheckConstraints (amount, refund_amount)
 #   • Properties (is_terminal, is_paid, is_refundable)
 #   • __str__ representations
@@ -36,18 +36,18 @@ class PaymentModelTests(TestCase):
     # ── Создание ──
 
     def test_create_payment_with_defaults(self):
-        """Платёж создаётся с авто-генерацией order_number."""
+        """Платёж создаётся с авто-генерацией payment_number."""
         self.assertIsNotNone(self.payment.pk)
-        self.assertTrue(self.payment.order_number.startswith('PAY-'))
+        self.assertTrue(self.payment.payment_number.startswith('PAY-'))
         self.assertEqual(self.payment.status, 'pending')
         self.assertEqual(self.payment.method, 'card')
         self.assertEqual(self.payment.provider, 'mock')
         self.assertEqual(self.payment.refund_amount, Decimal('0.00'))
 
     def test_order_number_auto_generation(self):
-        """order_number генерируется автоматически в формате PAY-000001."""
+        """payment_number генерируется автоматически в формате PAY-000001."""
         self.assertRegex(
-            self.payment.order_number,
+            self.payment.payment_number,
             r'PAY-\d{6}',
         )
 
@@ -59,10 +59,10 @@ class PaymentModelTests(TestCase):
         self.assertEqual(seq2, seq1 + 1)
 
     def test_order_number_unique(self):
-        """order_number уникален — IntegrityError при дубле."""
+        """payment_number уникален — IntegrityError при дубле."""
         with self.assertRaises(IntegrityError):
             payment2 = create_test_payment(self.order, self.user)
-            payment2.order_number = self.payment.order_number
+            payment2.payment_number = self.payment.payment_number
             payment2.save()
 
     # ── Properties ──

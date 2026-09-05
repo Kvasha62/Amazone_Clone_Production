@@ -78,7 +78,7 @@ class Command(BaseCommand):
                 f'отправлений (PREPARING > {hours}ч).'
             )
             for s in stale[:10]:
-                self.stdout.write(f'  • {s.internal_tracking}')
+                self.stdout.write(f'  • {s.shipment_number}')
             if count > 10:
                 self.stdout.write(f'  ... и ещё {count - 10}')
             self.stdout.write('[DRY RUN] Изменения НЕ применены.')
@@ -96,7 +96,7 @@ class Command(BaseCommand):
                 'stale_shipment_returned',
                 extra={
                     'shipment_id': shipment.pk,
-                    'internal_tracking': shipment.internal_tracking,
+                    'shipment_number': shipment.shipment_number,
                 },
             )
 

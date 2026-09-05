@@ -6,13 +6,14 @@
 #   POST /api/v1/shipping/calculate/              — расчёт стоимости
 #   GET  /api/v1/shipping/shipments/              — список отправлений
 #   POST /api/v1/shipping/shipments/              — создать отправление (staff)
-#   GET  /api/v1/shipping/shipments/{shipment}/         — детали отправления
-#   PATCH /api/v1/shipping/shipments/{shipment}/status/ — переход статуса (staff)
-#   POST /api/v1/shipping/shipments/{shipment}/tracking/— трек-номер (staff)
+#   GET  /api/v1/shipping/shipments/{shipment_number}/         — детали
+#   PATCH /api/v1/shipping/shipments/{shipment_number}/status/ — статус (staff)
+#   POST /api/v1/shipping/shipments/{shipment_number}/tracking/— трек (staff)
 #
 # ИДЕНТИФИКАТОР ОТПРАВЛЕНИЯ (F-8, issue #73):
-#   {shipment} — публичный internal_tracking (SHP-00000001);
-#   числовой PK принимается как deprecated-вариант.
+#   {shipment_number} — канонический публичный номер SHP-00000001.
+#   Целочисленный PK публичным идентификатором НЕ является.
+#   internal_tracking — внутреннее поле, публичным ID НЕ является.
 #   GET  /api/v1/shipping/track/{tracking}/       — отслеживание (публичный)
 #
 # 📖 https://www.django-rest-framework.org/api-guide/views/
@@ -34,11 +35,7 @@ from apps.core.pagination import (
 )
 from apps.core.serializers import PaginationResponseSerializer
 
-from apps.core.identifiers import (
-    is_shipment_number,
-    order_reference_filters,
-    parse_legacy_pk,
-)
+from apps.core.identifiers import is_shipment_number, order_reference_filters
 from apps.orders.models import Order
 from apps.shipping.models import Shipment, ShippingMethod
 from apps.shipping.serializers import (
@@ -67,38 +64,29 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _shipment_lookup(shipment: str) -> dict | None:
-    """ORM-фильтр по публичному идентификатору отправления (F-8, #73).
+def _get_shipment(queryset, shipment_number: str) -> Shipment:
+    """Возвращает отправление по каноническому публичному номеру либо 404.
 
-    ``SHP-00000001`` → ``{'internal_tracking': 'SHP-00000001'}``
-    ``"42"``         → ``{'pk': 42}`` (DEPRECATED: сырой целочисленный PK)
+    КОНТРАКТ (F-8, #73): единственный публичный способ адресовать
+    отправление — ``shipment_number`` (``SHP-00000001``).
 
-    ``None`` — значение не является ни публичным номером, ни допустимым PK и
-    поэтому не может соответствовать ни одному отправлению. Возвращаем
-    именно ``None``, а не «заведомо пустой фильтр»: фильтр вида
-    ``{'pk': None}`` пришлось бы отличать от валидного по значению внутри
-    словаря, и такая проверка ломается при первом же добавлении нового
-    вида идентификатора. Вызывающий код обязан превратить ``None`` в
-    канонический ``404 not_found``.
+    Целочисленный PK намеренно НЕ принимается: он никогда не был публичным
+    идентификатором этого ресурса (в отличие от order_id, который клиенты
+    реально использовали и для которого поэтому оставлено окно
+    совместимости). Принимать его — значит сохранить ровно ту
+    перечисляемость, ради устранения которой заведён shipment_number.
+
+    ``internal_tracking`` тоже не принимается: это внутреннее поле.
+
+    Любое значение, не являющееся корректным ``SHP-``-номером, не может
+    соответствовать ни одному отправлению и даёт канонический
+    ``404 not_found`` — до обращения к БД и без приведения типов.
     """
-    value = str(shipment)
-    if is_shipment_number(value):
-        return {'internal_tracking': value}
-
-    legacy_pk = parse_legacy_pk(value)
-    if legacy_pk is not None:
-        return {'pk': legacy_pk}
-
-    return None
-
-
-def _get_shipment(queryset, shipment: str) -> Shipment:
-    """Возвращает отправление по публичному идентификатору либо 404."""
-    lookup = _shipment_lookup(shipment)
-    if lookup is None:
+    if not is_shipment_number(shipment_number):
         raise NotFound('Отправление не найдено.')
+
     try:
-        return queryset.get(**lookup)
+        return queryset.get(shipment_number=shipment_number)
     except Shipment.DoesNotExist:
         raise NotFound('Отправление не найдено.')
 
@@ -286,17 +274,16 @@ class ShipmentCreateView(APIView):
 )
 class ShipmentDetailView(APIView):
     """
-    GET /api/v1/shipping/shipments/{shipment}/
+    GET /api/v1/shipping/shipments/{shipment_number}/
 
     Детали отправления. Пользователь видит только свои,
     staff — все.
 
-    {shipment} — публичный internal_tracking (SHP-00000001);
-    числовой PK принимается как deprecated-вариант (F-8, #73).
+    {shipment_number} — канонический публичный номер SHP-00000001 (F-8, #73).
     """
     permission_classes = (IsAuthenticated,)
 
-    def get(self, request, shipment):
+    def get(self, request, shipment_number):
         if request.user.is_staff:
             queryset = Shipment.objects.select_related(
                 'order', 'method', 'method__zone', 'user',
@@ -306,8 +293,8 @@ class ShipmentDetailView(APIView):
                 'order', 'method', 'method__zone', 'user',
             )
 
-        shipment_obj = _get_shipment(queryset, shipment)
-        serializer = ShipmentDetailSerializer(shipment_obj)
+        shipment = _get_shipment(queryset, shipment_number)
+        serializer = ShipmentDetailSerializer(shipment)
         return Response(serializer.data)
 
 
@@ -324,18 +311,17 @@ class ShipmentDetailView(APIView):
 )
 class ShipmentStatusView(APIView):
     """
-    PATCH /api/v1/shipping/shipments/{shipment}/status/
+    PATCH /api/v1/shipping/shipments/{shipment_number}/status/
 
     Переводит отправление в новый статус по правилам FSM.
     Только для staff.
 
-    {shipment} — публичный internal_tracking (SHP-00000001);
-    числовой PK принимается как deprecated-вариант (F-8, #73).
+    {shipment_number} — канонический публичный номер SHP-00000001 (F-8, #73).
     """
     permission_classes = (IsAdminUser,)
 
-    def patch(self, request, shipment):
-        shipment = _get_shipment(Shipment.objects.all(), shipment)
+    def patch(self, request, shipment_number):
+        shipment = _get_shipment(Shipment.objects.all(), shipment_number)
 
         input_ser = TransitionStatusSerializer(data=request.data)
         input_ser.is_valid(raise_exception=True)
@@ -360,18 +346,18 @@ class ShipmentStatusView(APIView):
 )
 class ShipmentTrackingView(APIView):
     """
-    POST /api/v1/shipping/shipments/{shipment}/tracking/
+    POST /api/v1/shipping/shipments/{shipment_number}/tracking/
 
-    Обновляет трек-номер отправления.
+    Обновляет ВНЕШНИЙ трек-номер службы доставки (carrier tracking).
+    Не меняет shipment_number — публичный идентификатор immutable.
     Только для staff.
 
-    {shipment} — публичный internal_tracking (SHP-00000001);
-    числовой PK принимается как deprecated-вариант (F-8, #73).
+    {shipment_number} — канонический публичный номер SHP-00000001 (F-8, #73).
     """
     permission_classes = (IsAdminUser,)
 
-    def post(self, request, shipment):
-        shipment = _get_shipment(Shipment.objects.all(), shipment)
+    def post(self, request, shipment_number):
+        shipment = _get_shipment(Shipment.objects.all(), shipment_number)
 
         input_ser = TrackingUpdateSerializer(data=request.data)
         input_ser.is_valid(raise_exception=True)

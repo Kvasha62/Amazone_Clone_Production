@@ -28,19 +28,24 @@ class CreateReviewInputSerializer(serializers.Serializer):
     """POST /api/v1/reviews/
 
     ИДЕНТИФИКАТОР ТОВАРА (F-8, issue #73):
-      product_uuid — канонический публичный идентификатор товара
-      (то же значение, что каталог отдаёт как ``id``);
-      product_id — устаревший целочисленный PK, принимается на окно
-      совместимости. Оба сразу → 400.
+      ``product_id`` — ЕДИНСТВЕННЫЙ способ сослаться на товар; его тип —
+      UUID (ровно то значение, которое каталог отдаёт как ``id``).
+
+      Параллельного поля ``product_uuid`` НЕТ и быть не должно: два ключа
+      для одной ссылки — это два пространства идентификаторов на одном
+      ресурсе, ради устранения которых и заведён frozen contract.
+
+      Целочисленный PK товара публичным идентификатором никогда не
+      являлся (каталог его не отдаёт), поэтому int-значение здесь не
+      «устаревший вариант», а ошибка — 400 с явным пояснением.
     """
 
-    product_id = serializers.IntegerField(
-        help_text='DEPRECATED: целочисленный PK товара. Используйте product_uuid.',
-        required=False,
-    )
-    product_uuid = serializers.UUIDField(
-        help_text='UUID товара — канонический публичный идентификатор.',
-        required=False,
+    product_id = serializers.UUIDField(
+        help_text=(
+            'UUID товара — канонический публичный идентификатор '
+            '(значение поля `id` из каталога).'
+        ),
+        required=True,
     )
     rating = serializers.IntegerField(
         min_value=MIN_RATING,
@@ -59,20 +64,29 @@ class CreateReviewInputSerializer(serializers.Serializer):
         help_text=f'От {MIN_REVIEW_TEXT_LENGTH} до {MAX_REVIEW_TEXT_LENGTH} символов.',
     )
 
-    def validate(self, data):
-        """Ровно один идентификатор товара (F-8, #73)."""
-        product_id = data.get('product_id')
-        product_uuid = data.get('product_uuid')
+    def to_internal_value(self, data):
+        """Отклоняет целочисленный product_id ДО разбора UUIDField.
 
-        if product_id and product_uuid:
-            raise serializers.ValidationError(
-                'Укажите либо product_uuid, либо product_id (устар.), но не оба.',
-            )
-        if not product_id and not product_uuid:
-            raise serializers.ValidationError(
-                {'product_uuid': 'Обязательное поле.'},
-            )
-        return data
+        ЗАЧЕМ: DRF UUIDField принимает int и молча трактует его как
+        ``UUID(int=value)``. То есть product_id=1 превратился бы в
+        ``00000000-...-0001`` — синтаксически корректный, но никому не
+        принадлежащий UUID, и клиент получил бы 404 «товар не найден»
+        вместо внятного «product_id должен быть UUID».
+
+        Целочисленный PK товара наружу никогда не отдавался, поэтому это
+        именно ошибка формата → 400.
+        """
+        product_id = data.get('product_id') if hasattr(data, 'get') else None
+        if isinstance(product_id, bool) or isinstance(product_id, int) or (
+            isinstance(product_id, str) and product_id.isascii()
+            and product_id.isdigit()
+        ):
+            raise serializers.ValidationError({
+                'product_id': (
+                    'product_id должен быть UUID товара, а не числовым PK.'
+                ),
+            })
+        return super().to_internal_value(data)
 
 
 class UpdateReviewInputSerializer(serializers.Serializer):
@@ -114,9 +128,10 @@ class ReviewListSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(
         source='user.email', read_only=True,
     )
-    # F-8 (#73): публичный идентификатор товара. 'product_id' остаётся в
-    # payload на окно совместимости и помечен как deprecated.
-    product_uuid = serializers.UUIDField(
+    # F-8 (#73): ссылка на товар — ровно одно поле product_id, тип UUID.
+    # Явное объявление обязательно: ModelSerializer иначе подставил бы
+    # целочисленный FK-атрибут product_id и вернул внутренний PK.
+    product_id = serializers.UUIDField(
         source='product.uuid', read_only=True,
     )
     helpful_score = serializers.IntegerField(read_only=True)
@@ -133,7 +148,6 @@ class ReviewListSerializer(serializers.ModelSerializer):
             'id',
             'user_id',
             'user_email',
-            'product_uuid',
             'product_id',
             'rating',
             'title',
@@ -153,8 +167,9 @@ class ReviewSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(
         source='user.email', read_only=True,
     )
-    # F-8 (#73): публичный идентификатор товара; 'product_id' — deprecated.
-    product_uuid = serializers.UUIDField(
+    # F-8 (#73): ссылка на товар — ровно одно поле product_id, тип UUID
+    # (см. пояснение в ReviewListSerializer).
+    product_id = serializers.UUIDField(
         source='product.uuid', read_only=True,
     )
     helpful_score = serializers.IntegerField(read_only=True)
@@ -171,7 +186,6 @@ class ReviewSerializer(serializers.ModelSerializer):
             'id',
             'user_id',
             'user_email',
-            'product_uuid',
             'product_id',
             'rating',
             'title',
