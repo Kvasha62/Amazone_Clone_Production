@@ -1,6 +1,6 @@
 import logging
 
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import NotFound
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -14,11 +14,13 @@ from apps.core.pagination import (
 from apps.core.serializers import PaginationResponseSerializer
 
 from apps.discounts.models import Coupon
+from apps.core.identifiers import order_reference_filters
 from apps.discounts.serializers import (
     ApplyCouponInputSerializer,
     CouponListSerializer,
     PreviewDiscountInputSerializer,
     PreviewDiscountOutputSerializer,
+    RemoveCouponInputSerializer,
 )
 from apps.discounts.services.discount_service import DiscountService
 from apps.orders.models import Order
@@ -76,7 +78,10 @@ class CouponApplyView(APIView):
         data = input_ser.validated_data
 
         try:
-            order = Order.objects.get(pk=data['order_id'], user=request.user)
+            order = Order.objects.get(
+                user=request.user,
+                **order_reference_filters(data),
+            )
         except Order.DoesNotExist:
             raise NotFound('Заказ не найден.')
 
@@ -85,6 +90,9 @@ class CouponApplyView(APIView):
         )
 
         return Response({
+            # F-8 (#73): публичный идентификатор заказа в ответе.
+            'order_number': order.order_number,
+            # DEPRECATED: целочисленный PK, оставлен на окно совместимости.
             'order_id': order.pk,
             'discount': str(order.discount),
             'total': str(order.total),
@@ -94,6 +102,7 @@ class CouponApplyView(APIView):
 @extend_schema_view(
     post=extend_schema(
         summary='Снять скидку',
+        request=RemoveCouponInputSerializer,
         responses={200: 'Discount removed'},
     ),
 )
@@ -102,18 +111,24 @@ class CouponRemoveView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def post(self, request):
-        order_id = request.data.get('order_id')
-        if not order_id:
-            raise ValidationError({'order_id': 'Обязательное поле.'})
+        input_ser = RemoveCouponInputSerializer(data=request.data)
+        input_ser.is_valid(raise_exception=True)
+        data = input_ser.validated_data
 
         try:
-            order = Order.objects.get(pk=order_id, user=request.user)
+            order = Order.objects.get(
+                user=request.user,
+                **order_reference_filters(data),
+            )
         except Order.DoesNotExist:
             raise NotFound('Заказ не найден.')
 
         order = OrderService.remove_coupon(order, user=request.user)
 
         return Response({
+            # F-8 (#73): публичный идентификатор заказа в ответе.
+            'order_number': order.order_number,
+            # DEPRECATED: целочисленный PK, оставлен на окно совместимости.
             'order_id': order.pk,
             'discount': str(order.discount),
             'total': str(order.total),

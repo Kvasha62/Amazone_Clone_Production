@@ -172,14 +172,14 @@ class PaymentService:
             event_type=PAYMENT_EVENT_CREATED,
             new_status=PAYMENT_STATUS_PENDING,
             performed_by=user,
-            note=f'Платёж {payment.order_number} создан для заказа {order.order_number}',
+            note=f'Платёж {payment.payment_number} создан для заказа {order.order_number}',
         )
 
         logger.info(
             'payment_created',
             extra={
                 'payment_id': payment.pk,
-                'payment_number': payment.order_number,
+                'payment_number': payment.payment_number,
                 'order_id': order.pk,
                 'amount': str(amount),
                 'method': method,
@@ -1268,7 +1268,7 @@ class PaymentService:
         Бросает NotFound если не найден.
         """
         try:
-            return Payment.objects.get(order_number=payment_number)
+            return Payment.objects.get(payment_number=payment_number)
         except Payment.DoesNotExist:
             raise NotFound('Платёж не найден.')
 

@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from apps.core.identifiers import OrderReferenceSerializerMixin
 from apps.shipping.models import Shipment, ShippingMethod, ShippingZone
 
 
@@ -151,12 +152,13 @@ class ShippingCostResponseSerializer(serializers.Serializer):
 # Shipment
 # ================================================================
 
-class ShipmentCreateSerializer(serializers.Serializer):
-    """Запрос создания отправления."""
+class ShipmentCreateSerializer(OrderReferenceSerializerMixin):
+    """Запрос создания отправления.
 
-    order_id = serializers.IntegerField(
-        help_text='ID заказа.',
-    )
+    ССЫЛКА НА ЗАКАЗ (F-8, issue #73):
+      order_number (``ORD-000001``) — канонический публичный идентификатор;
+      order_id — устаревший целочисленный PK (принимается, deprecated).
+    """
     method_id = serializers.IntegerField(
         help_text='ID способа доставки.',
     )
@@ -173,7 +175,16 @@ class ShipmentCreateSerializer(serializers.Serializer):
 
 
 class ShipmentListSerializer(serializers.ModelSerializer):
-    """Сериализатор списка отправлений."""
+    """Сериализатор списка отправлений.
+
+    ИДЕНТИФИКАТОРЫ (F-8, #73):
+      • ``shipment_number`` (SHP-00000001) — канонический публичный
+        идентификатор ресурса;
+      • ``tracking_number`` — ВНЕШНИЙ трек службы доставки (carrier),
+        не идентификатор ресурса;
+      • ``internal_tracking`` — ВНУТРЕННЕЕ поле, наружу НЕ отдаётся;
+      • целочисленный PK наружу не отдаётся.
+    """
 
     order_number = serializers.CharField(
         source='order.order_number',
@@ -191,7 +202,7 @@ class ShipmentListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Shipment
         fields = (
-            'id', 'internal_tracking', 'tracking_number',
+            'shipment_number', 'tracking_number',
             'order_number', 'method_name', 'status',
             'status_display', 'shipping_cost',
             'shipped_at', 'delivered_at', 'created_at',
@@ -252,9 +263,14 @@ class ShipmentTrackingSerializer(serializers.Serializer):
     """
     Публичный сериализатор для отслеживания по трек-номеру.
     Не содержит чувствительных данных (user_email, order_id).
+
+    F-8 (#73): ``internal_tracking`` из этого payload УБРАН — это
+    внутреннее поле. Публичный endpoint ищет по внешнему
+    ``tracking_number`` (F-4, #69) и раскрывать внутренний код не должен.
+    ``shipment_number`` здесь тоже не отдаётся: endpoint анонимный, а
+    номер отправления — адрес owner-scoped ресурса.
     """
 
-    internal_tracking = serializers.CharField()
     tracking_number = serializers.CharField()
     status = serializers.CharField()
     status_display = serializers.CharField(

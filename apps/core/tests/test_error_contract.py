@@ -254,14 +254,18 @@ class CatalogCartOrdersErrorContractTests(TestCase):
         )
         assert_envelope(self, resp, http_status=400, code=CODE_VALIDATION)
 
-    def test_discounts_remove_missing_order_id(self):
+    def test_discounts_remove_missing_order_reference(self):
+        """F-8 (#73): каноническое поле ссылки на заказ — order_number."""
         self.client.force_authenticate(self.user)
         resp = self.client.post("/api/v1/discounts/remove/", {}, format="json")
         body = assert_envelope(
             self, resp, http_status=400, code=CODE_VALIDATION,
         )
         self.assertTrue(
-            any(item["field"] == "order_id" for item in body["error"]["details"])
+            any(
+                item["field"] == "order_number"
+                for item in body["error"]["details"]
+            )
         )
 
     def test_payments_idor_404(self):

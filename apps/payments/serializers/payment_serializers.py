@@ -33,6 +33,7 @@ from apps.payments.constants import (
     PAYMENT_METHOD_CARD,
     PAYMENT_STATUS_SUCCEEDED,
 )
+from apps.core.identifiers import OrderReferenceSerializerMixin
 from apps.payments.models import Payment, PaymentEvent
 from apps.payments.models.payment import PaymentStatus
 
@@ -41,21 +42,23 @@ from apps.payments.models.payment import PaymentStatus
 # INPUT-СЕРИАЛИЗАТОРЫ
 # ==============================================================
 
-class CreatePaymentInputSerializer(serializers.Serializer):
+class CreatePaymentInputSerializer(OrderReferenceSerializerMixin):
     """
     Валидация тела POST /api/v1/payments/.
 
-    ФОРМАТ ЗАПРОСА:
+    ФОРМАТ ЗАПРОСА (F-8, issue #73):
         {
-            "order_id": 1,
+            "order_number": "ORD-000001", // канонический идентификатор заказа
             "amount": "1500.00",        // опционально, default = order.total
             "method": "card",            // опционально, default = "card"
             "provider": "mock"           // опционально, default = "mock"
         }
+
+    ССЫЛКА НА ЗАКАЗ (F-8):
+      order_number — канонический публичный идентификатор;
+      order_id — устаревший целочисленный PK, всё ещё принимается.
+      Ровно одно из полей; оба сразу → 400.
     """
-    order_id = serializers.IntegerField(
-        help_text='ID заказа для оплаты.',
-    )
     amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -193,12 +196,22 @@ class PaymentListSerializer(serializers.ModelSerializer):
         source='get_method_display',
         read_only=True,
     )
-    order_number = serializers.CharField(read_only=True)
+    # F-8 (#73): ДВА РАЗНЫХ идентификатора, не путать.
+    #   payment_number — идентичность самого платежа (PAY-000001);
+    #   order_number   — ссылка на заказ (ORD-000001), берётся из FK.
+    # Раньше модельное поле с PAY-значением называлось order_number и
+    # отдавалось под ключом order_number — клиент получал номер платежа
+    # там, где по контракту обязан быть номер заказа.
+    payment_number = serializers.CharField(read_only=True)
+    order_number = serializers.CharField(
+        source='order.order_number', read_only=True,
+    )
 
     class Meta:
         model = Payment
         fields = (
             'id',
+            'payment_number',
             'order_number',
             'status',
             'status_display',
@@ -230,12 +243,22 @@ class PaymentSerializer(serializers.ModelSerializer):
     is_paid = serializers.BooleanField(read_only=True)
     is_refundable = serializers.BooleanField(read_only=True)
     events = PaymentEventSerializer(many=True, read_only=True)
-    order_number = serializers.CharField(read_only=True)
+    # F-8 (#73): ДВА РАЗНЫХ идентификатора, не путать.
+    #   payment_number — идентичность самого платежа (PAY-000001);
+    #   order_number   — ссылка на заказ (ORD-000001), берётся из FK.
+    # Раньше модельное поле с PAY-значением называлось order_number и
+    # отдавалось под ключом order_number — клиент получал номер платежа
+    # там, где по контракту обязан быть номер заказа.
+    payment_number = serializers.CharField(read_only=True)
+    order_number = serializers.CharField(
+        source='order.order_number', read_only=True,
+    )
 
     class Meta:
         model = Payment
         fields = (
             'id',
+            'payment_number',
             'order_number',
             'status',
             'status_display',

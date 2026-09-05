@@ -329,7 +329,7 @@ class ShippingService:
             raise ValidationError({
                 'detail': (
                     f'Заказ {order.order_number} уже имеет отправление '
-                    f'({order.shipment.internal_tracking}).'
+                    f'({order.shipment.shipment_number}).'
                 ),
             })
 
@@ -372,7 +372,7 @@ class ShippingService:
             'shipment_created',
             extra={
                 'shipment_id': shipment.pk,
-                'internal_tracking': shipment.internal_tracking,
+                'shipment_number': shipment.shipment_number,
                 'order_id': order.pk,
                 'order_number': order.order_number,
                 'method': str(method),
@@ -415,7 +415,7 @@ class ShippingService:
             'shipment_tracking_updated',
             extra={
                 'shipment_id': shipment.pk,
-                'internal_tracking': shipment.internal_tracking,
+                'shipment_number': shipment.shipment_number,
                 'tracking_number': tracking_number,
             },
         )
@@ -473,7 +473,7 @@ class ShippingService:
         if shipment.is_terminal:
             raise ValidationError({
                 'detail': (
-                    f'Отправление {shipment.internal_tracking} '
+                    f'Отправление {shipment.shipment_number} '
                     f'в терминальном статусе '
                     f'«{shipment.get_status_display()}». '
                     f'Дальнейшие переходы невозможны.'
@@ -519,7 +519,7 @@ class ShippingService:
             'shipment_status_changed',
             extra={
                 'shipment_id': shipment.pk,
-                'internal_tracking': shipment.internal_tracking,
+                'shipment_number': shipment.shipment_number,
                 'old_status': current_status,
                 'new_status': new_status,
             },
@@ -690,12 +690,17 @@ class ShippingService:
         Возвращает отправление по внешнему трек-номеру (carrier number).
 
         Публичный endpoint отслеживания резолвит shipment ТОЛЬКО по
-        ``Shipment.tracking_number``. Внутренний идентификатор
-        ``Shipment.internal_tracking`` (``SHP-*``) является внутренним и
-        НЕ принимается публичным endpoint как ключ поиска (Issue #69 /
-        API-01 / F-4). В случае передачи ``internal_tracking`` или
-        полностью неизвестного номера метод ведёт себя одинаково —
-        ``NotFound`` → канонический ``404 not_found``.
+        ``Shipment.tracking_number`` — это ВНЕШНИЙ номер службы доставки.
+
+        Ни ``shipment_number`` (``SHP-*``, канонический публичный, но
+        owner-scoped идентификатор), ни ``internal_tracking`` (внутреннее
+        поле) этим анонимным endpoint как ключ поиска НЕ принимаются
+        (Issue #69 / API-01 / F-4, F-8): иначе знание номера отправления
+        давало бы доступ к чужому заказу без аутентификации.
+
+        При передаче любого из них, равно как и полностью неизвестного
+        номера, поведение одинаково — ``NotFound`` → канонический
+        ``404 not_found``.
 
         RAISES:
             NotFound: если отправление не найдено
@@ -706,10 +711,10 @@ class ShippingService:
             ).get(tracking_number=tracking_number)
         except Shipment.DoesNotExist:
             # Публичный endpoint: сообщение об ошибке НЕ должно эхо-отражать
-            # строку запроса (она может быть существующим internal_tracking
-            # или произвольным значением). Единый нейтральный текст делает
-            # ответы для existing internal_tracking и полностью неизвестного
-            # трека неразличимыми (Issue #69 — не раскрывать существование
+            # строку запроса (она может быть существующим shipment_number /
+            # internal_tracking или произвольным значением). Единый
+            # нейтральный текст делает ответы для существующих внутренних
+            # идентификаторов и полностью неизвестного трека неразличимыми (Issue #69 — не раскрывать существование
             # shipment и не отражать недоверенный ввод).
             raise NotFound(
                 'Отправление не найдено.'

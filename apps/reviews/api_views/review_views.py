@@ -33,6 +33,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.identifiers import parse_uuid
 from apps.core.pagination import (
     build_paginated_response_data,
     ensure_deterministic_ordering,
@@ -80,7 +81,7 @@ VALID_ORDERINGS = {
         summary='Список отзывов',
         description=(
             'Возвращает отзывы. Публичный эндпоинт — авторизация не нужна.\n'
-            'Фильтрация: ?product_id=&product_uuid=&user_id=&rating=&rating_gte=&rating_lte=&verified=\n'
+            'Фильтрация: ?product_id=<uuid>&user_id=&rating=&rating_gte=&rating_lte=&verified=\n'
             'Сортировка: ?ordering=-rating|rating|-created_at|created_at|helpful\n'
             'Пагинация: ?page=1&page_size=20'
         ),
@@ -112,8 +113,7 @@ class ReviewListView(APIView):
         GET /api/v1/reviews/
 
         Query params:
-          ?product_id=1        — отзывы на товар (числовой PK)
-          ?product_uuid=abc    — отзывы на товар (UUID)
+          ?product_id=<uuid>   — отзывы на товар (канонический идентификатор)
           ?user_id=2           — отзывы пользователя
           ?rating=5            — только 5-звёздочные
           ?rating_gte=4        — рейтинг ≥ 4
@@ -123,29 +123,30 @@ class ReviewListView(APIView):
           ?page=1              — страница
           ?page_size=20        — размер страницы
         """
-        qs = Review.objects.approved().with_user()
+        qs = Review.objects.approved().with_user().with_product()
 
-        # ── Фильтр по товару (PK) ──
+        # ── Фильтр по товару (F-8, #73) ──
+        # Ровно один ключ — product_id, и его тип UUID. Второго
+        # (product_uuid) не существует: параллельные пространства
+        # идентификаторов на одном ресурсе запрещены frozen contract.
+        # Некорректный UUID → 400, а не тихий пустой список.
         product_id = request.query_params.get('product_id')
-        if product_id:
-            try:
-                qs = qs.for_product_id(int(product_id))
-            except (ValueError, TypeError):
-                raise ValidationError({'product_id': 'Некорректный product_id.'})
 
-        # ── Фильтр по товару (UUID) — для React-фронтенда ──
-        product_uuid = request.query_params.get('product_uuid')
-        if product_uuid and not product_id:
-            try:
-                import uuid as _uuid
-                _uuid.UUID(str(product_uuid))  # валидация формата
-                product = Product.objects.filter(uuid=product_uuid).first()
-                if product:
-                    qs = qs.for_product_id(product.pk)
-                else:
-                    qs = qs.none()
-            except (ValueError, AttributeError):
+        if product_id:
+            parsed_uuid = parse_uuid(product_id)
+            if parsed_uuid is None:
+                raise ValidationError({
+                    'product_id': (
+                        'Некорректный product_id: ожидается UUID товара.'
+                    ),
+                })
+            product = Product.objects.filter(uuid=parsed_uuid).first()
+            if product is None:
+                # Валидный, но неизвестный UUID — пустая выдача, а не 404:
+                # список отзывов существует, просто он пуст.
                 qs = qs.none()
+            else:
+                qs = qs.for_product_id(product.pk)
 
         # ── Фильтр по пользователю ──
         user_id = request.query_params.get('user_id')
@@ -167,9 +168,9 @@ class ReviewListView(APIView):
                     build_paginated_response_data(request, [], meta),
                 )
             qs = qs.for_user_id(uid)
-        elif not product_id and not product_uuid:
+        elif not product_id:
             # Нет фильтра по товару — если авторизован, показываем свои отзывы;
-            # если нет — пустой список (нужен product_id/product_uuid)
+            # если нет — пустой список (нужен product_id или user_id)
             if request.user.is_authenticated:
                 qs = qs.for_user(request.user)
             else:
@@ -256,22 +257,13 @@ class ReviewListView(APIView):
         input_ser.is_valid(raise_exception=True)
         data = input_ser.validated_data
 
-        # 🔴 Поддержка product_uuid — для React-фронтенда
-        product_uuid = data.get('product_uuid')
-        product_id = data.get('product_id')
-
-        if product_uuid:
-            try:
-                product = Product.objects.get(uuid=product_uuid)
-            except Product.DoesNotExist:
-                raise NotFound('Товар не найден.')
-        elif product_id:
-            try:
-                product = Product.objects.get(pk=product_id)
-            except Product.DoesNotExist:
-                raise NotFound('Товар не найден.')
-        else:
-            raise ValidationError('Укажите product_id или product_uuid.')
+        # F-8 (#73): единственная ссылка на товар — product_id типа UUID.
+        # Формат уже провалидирован CreateReviewInputSerializer (UUIDField),
+        # поэтому здесь остаётся только резолв существования.
+        try:
+            product = Product.objects.get(uuid=data['product_id'])
+        except Product.DoesNotExist:
+            raise NotFound('Товар не найден.')
 
         review = ReviewService.create_review(
             user=request.user,

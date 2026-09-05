@@ -31,7 +31,7 @@ def on_shipment_saved(sender, instance, created, **kwargs):
             'shipment_created_signal',
             extra={
                 'shipment_id': instance.pk,
-                'internal_tracking': instance.internal_tracking,
+                'shipment_number': instance.shipment_number,
                 'order_id': instance.order_id,
                 'status': instance.status,
                 'shipping_cost': str(instance.shipping_cost),

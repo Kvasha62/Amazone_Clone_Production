@@ -31,6 +31,7 @@ from rest_framework import status
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from apps.core.api_errors import BadGateway
+from apps.core.identifiers import order_reference_filters
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -114,7 +115,7 @@ class _PaymentViewMixin:
         try:
             payment = Payment.objects.select_related(
                 'order', 'user',
-            ).get(order_number=payment_number)
+            ).get(payment_number=payment_number)
         except Payment.DoesNotExist:
             raise NotFound('Платёж не найден.')
 
@@ -175,6 +176,8 @@ class PaymentListView(_PaymentViewMixin, APIView):
         ПОТОК:
           1. Валидация body (CreatePaymentInputSerializer)
           2. Получение заказа с owner scoping (Issue #68 / API-01 F-3)
+             по публичному order_number заказа (F-8 / #73) либо по
+             устаревшему order_id
           3. Определение суммы (из body или из заказа)
           4. PaymentService.create_payment() — бизнес-логика
           5. Сериализация и ответ (201 CREATED)
@@ -194,8 +197,8 @@ class PaymentListView(_PaymentViewMixin, APIView):
         # Получаем заказ с owner scoping (IDOR-защита на boundary view):
         # заказ другого пользователя неотличим от несуществующего → 404.
         order = Order.objects.filter(
-            pk=data['order_id'],
             user=request.user,
+            **order_reference_filters(data),
         ).first()
         if order is None:
             raise NotFound('Заказ не найден.')
@@ -283,7 +286,7 @@ class PaymentRefundView(APIView):
           4. Сериализация и ответ
         """
         try:
-            payment = Payment.objects.get(order_number=payment_number)
+            payment = Payment.objects.get(payment_number=payment_number)
         except Payment.DoesNotExist:
             raise NotFound('Платёж не найден.')
 

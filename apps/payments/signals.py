@@ -38,7 +38,7 @@ def on_payment_saved(sender, instance: Payment, created: bool, **kwargs):
             'payment_created_signal',
             extra={
                 'payment_id': instance.pk,
-                'payment_number': instance.order_number,
+                'payment_number': instance.payment_number,
                 'order_id': instance.order_id,
                 'amount': str(instance.amount),
                 'status': instance.status,
@@ -49,7 +49,7 @@ def on_payment_saved(sender, instance: Payment, created: bool, **kwargs):
             'payment_updated_signal',
             extra={
                 'payment_id': instance.pk,
-                'payment_number': instance.order_number,
+                'payment_number': instance.payment_number,
                 'status': instance.status,
             },
         )

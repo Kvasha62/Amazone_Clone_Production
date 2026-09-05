@@ -117,7 +117,7 @@ class Command(BaseCommand):
                         payment,
                     )
                     report['payment_reconciliations'].append({
-                        'payment_number': payment.order_number,
+                        'payment_number': payment.payment_number,
                         'order_number': order.order_number,
                         'outcome': outcome,
                     })

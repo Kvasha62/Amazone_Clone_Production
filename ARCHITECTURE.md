@@ -236,6 +236,11 @@ number from the PostgreSQL sequence `orders_order_number_seq`
 (`nextval()`), which is atomic in the database, so parallel order creation
 needs no `select_for_update()` and no read-then-increment (ADR-005).
 
+`Shipment.save()` allocates `shipment_number` from
+`shipping_shipment_number_seq` by the same mechanism (F-8, #73). This
+replaced a `MAX(_tracking_seq) + 1` read-then-increment, which could hand
+the same number to two concurrent inserts.
+
 ### 3. BaseModel (Abstract Base Class)
 
 **Rule.** All domain models inherit from `BaseModel` (except `User`
@@ -551,7 +556,7 @@ without user authentication) and requires HMAC-SHA256 verification via the
 |------------------|----------------------------------------------|
 | `ShippingMethod` | Delivery method with zone-based pricing       |
 | `ShippingZone`   | Geographic zone (country/region)             |
-| `Shipment`       | Order shipment with tracking number          |
+| `Shipment`       | Order shipment; `shipment_number` public id, `tracking_number` external carrier code, `internal_tracking` internal |
 
 ### `wishlist` — Favorites
 
@@ -620,6 +625,8 @@ Stock ──1:N── StockMovement (audit)
 | `cart_cart`        | `unique_active_user_cart`                   | One active cart per user       |
 | `cart_cartitem`    | `unique_cart_variant`                       | No duplicate variants in cart  |
 | `orders_order`     | `order_number` `unique=True`                | No duplicate order numbers     |
+| `shipping_shipment`| `shipment_number` `unique=True`             | No duplicate shipment numbers  |
+| `payments_payment` | `payment_number` `unique=True`              | No duplicate payment numbers   |
 | `orders_orderitem` | `unique_order_sku`                          | No duplicate SKUs in order     |
 | `reviews_review`   | `unique_user_product_review`                | One review per user per product|
 | `review_helpful`   | `unique_user_review_helpful_vote`           | One vote per user per review   |
@@ -1032,7 +1039,7 @@ every app because `core` has no domain dependencies):
 | `OrderAdmin` | `Order.status` | `OrderService.confirm()` / `cancel()` / `transition_status()` (also exposed as the existing `confirm_selected` / `cancel_selected` actions) | `notes`, `cancellation_reason`; status stays visible and filterable |
 | `StockAdmin` | `Stock.variant`, `quantity`, `reserved_quantity` | `InventoryService.restock()` / `adjust_stock()` / `reserve_stock()` / `release_stock()` / `commit_stock()`; rows created by `get_or_create_stock()` | `low_stock_threshold` (operational config); `StockMovementInline` stays a read-only audit view and offers no add form |
 | `PriceAdmin` | `Price.variant`, `price`, `sale_price`, `currency` | `PricingService.set_price()` / `remove_price()` (API `POST /api/v1/pricing/variants/{id}/price/`, `POST /api/v1/pricing/prices/bulk/`) | inspection only; Admin add is not offered because a price row cannot exist without a price value |
-| `ShipmentAdmin` | `Shipment.status`, `shipped_at`, `delivered_at` | `ShippingService.transition_status()` (API `PATCH /api/v1/shipping/shipments/{id}/status/`), `ShippingService.create_shipment()` | `tracking_number` (also `ShippingService.update_tracking()`), `notes`, `weight_kg` |
+| `ShipmentAdmin` | `Shipment.status`, `shipped_at`, `delivered_at` | `ShippingService.transition_status()` (API `PATCH /api/v1/shipping/shipments/{shipment_number}/status/`), `ShippingService.create_shipment()` | `tracking_number` (also `ShippingService.update_tracking()`), `notes`, `weight_kg` |
 | `CouponAdmin` | `Coupon.times_used` | `DiscountService.register_usage()` / `release_usage()` | code, discount type/value, limits, period, `is_active` |
 | `CartItemAdmin`, `CartItemInline` | `CartItem.variant`, `quantity` | `CartService.add_item()` / `update_item_quantity()` / `remove_item()` | inspection only on both surfaces; inline offers no add form |
 

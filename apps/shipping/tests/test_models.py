@@ -4,7 +4,8 @@
 # Проверяет:
 #   • ShippingZone: создание, contains_region, __str__
 #   • ShippingMethod: создание, calculate_cost, estimated_days_display, __str__
-#   • Shipment: создание, авто-генерация internal_tracking, is_terminal, __str__
+#   • Shipment: создание, авто-генерация shipment_number (публичный
+#     идентификатор) и internal_tracking (внутреннее поле), is_terminal, __str__
 #
 # 📖 https://docs.djangoproject.com/en/stable/topics/testing/overview/
 # ────────────────────────────────────────────────────────────────────────
@@ -231,10 +232,10 @@ class ShipmentModelTests(TestCase):
         self.assertNotEqual(s1.internal_tracking, s2.internal_tracking)
 
     def test_str_representation(self):
-        """__str__ содержит трек и статус."""
+        """__str__ содержит публичный номер отправления и статус."""
         shipment = create_test_shipment(self.order)
         str_repr = str(shipment)
-        self.assertIn(shipment.internal_tracking, str_repr)
+        self.assertIn(shipment.shipment_number, str_repr)
         self.assertIn('Собирается', str_repr)
 
     def test_is_terminal_preparing(self):

@@ -162,6 +162,6 @@ class PaymentEvent(BaseModel):
     def __str__(self):
         return (
             f'PaymentEvent({self.event_type}) '
-            f'for {getattr(self.payment, "order_number", "?")} '
+            f'for {getattr(self.payment, "payment_number", "?")} '
             f'@ {self.created_at:%Y-%m-%d %H:%M}'
         )

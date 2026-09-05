@@ -13,8 +13,14 @@
 #   • Один заказ = одно отправление (1:1)
 #     (в реальном проекте может быть 1:N для многотомных заказов)
 #   • shipping_cost — snapshot стоимости (не пересчитывается)
-#   • tracking_number — внешний трек от службы доставки
-#   • internal_tracking — внутренний трек (SHP-00000001)
+#   • ТРИ РАЗНЫХ ИДЕНТИФИКАТОРА (F-8, #73) — не путать:
+#       – shipment_number   — КАНОНИЧЕСКИЙ ПУБЛИЧНЫЙ id (SHP-00000001),
+#                             immutable, выдаётся SEQUENCE, адресует
+#                             ресурс в URL и отдаётся в API;
+#       – tracking_number   — ВНЕШНИЙ трек службы доставки (carrier),
+#                             приходит извне, может меняться/отсутствовать;
+#       – internal_tracking — ВНУТРЕННЕЕ складское поле, в публичные
+#                             serializers НЕ попадает.
 #
 # 📖 https://docs.djangoproject.com/en/stable/ref/models/fields/#decimalfield
 #
@@ -23,15 +29,18 @@
 #   • API трекинга → ImportError
 # ────────────────────────────────────────────────────────────────────────
 
+import logging
 from decimal import Decimal
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import connections, models, router
 
 from apps.core.models.base_model import BaseModel
 from apps.shipping.constants import (
     MAX_TRACKING_NUMBER_LENGTH,
+    SHIPMENT_NUMBER_DIGITS,
+    SHIPMENT_NUMBER_PREFIX,
     SHIPMENT_PREPARING,
     SHIPMENT_STATUS_CHOICES,
     SHIPMENT_STATUS_TRANSITIONS,
@@ -39,6 +48,60 @@ from apps.shipping.constants import (
     SHIPMENT_TRACKING_DIGITS,
     SHIPMENT_TRACKING_PREFIX,
 )
+
+
+logger = logging.getLogger(__name__)
+
+# Имя PostgreSQL SEQUENCE для публичных номеров отправлений.
+# Создаётся миграцией apps/shipping/migrations/0003_shipment_number.py
+# и выставляется из MAX(_shipment_number_seq) — существующие отправления
+# сохраняют свои номера (см. ADR-005: тот же механизм для order_number).
+SHIPMENT_NUMBER_SEQUENCE = 'shipping_shipment_number_seq'
+
+
+def format_shipment_number(sequence_value: int) -> str:
+    """Форматирует числовое значение в публичный номер: ``SHP-00000001``."""
+    return f'{SHIPMENT_NUMBER_PREFIX}-{sequence_value:0{SHIPMENT_NUMBER_DIGITS}d}'
+
+
+def allocate_shipment_number(*, using: str | None = None) -> tuple[int, str]:
+    """Выдаёт следующий номер отправления: ``(число, 'SHP-00000001')``.
+
+    Механизм полностью повторяет ADR-005 (order_number): значение выдаёт
+    PostgreSQL SEQUENCE через ``nextval()``, который атомарен на стороне
+    СУБД. Прежняя схема ``SELECT MAX(...) + 1`` — read-then-increment:
+    две параллельные вставки читали один MAX и получали один номер,
+    превращая гонку в ``IntegrityError`` на UNIQUE.
+
+    Откат транзакции расходует значение (nextval не транзакционен), поэтому
+    в нумерации возможны gaps; гарантируются уникальность и монотонность.
+    """
+    connection = (
+        connections[using] if using
+        else connections[router.db_for_write(Shipment)]
+    )
+    sequence_value = _next_shipment_number_sequence(connection)
+    return sequence_value, format_shipment_number(sequence_value)
+
+
+def _next_shipment_number_sequence(connection) -> int:
+    """Возвращает следующее числовое значение номера отправления."""
+    if connection.vendor == 'postgresql':
+        with connection.cursor() as cursor:
+            # Имя SEQUENCE идёт параметром (nextval принимает regclass) —
+            # конкатенации SQL нет.
+            cursor.execute('SELECT nextval(%s)', [SHIPMENT_NUMBER_SEQUENCE])
+            return int(cursor.fetchone()[0])
+
+    # Fallback для бэкендов без SEQUENCE (SQLite — dev-режим, не production).
+    logger.warning(
+        'shipment_number_sequence_unsupported_backend',
+        extra={'vendor': connection.vendor},
+    )
+    max_seq = Shipment.objects.using(connection.alias).aggregate(
+        max_seq=models.Max('_shipment_number_seq'),
+    )['max_seq'] or 0
+    return max_seq + 1
 
 
 def generate_internal_tracking() -> str:
@@ -128,7 +191,33 @@ class Shipment(BaseModel):
         help_text='Трек-номер от службы доставки.',
     )
 
+    # ── Публичный номер отправления (F-8, #73) ──
+    # КАНОНИЧЕСКИЙ публичный идентификатор ресурса Shipment: SHP-00000001.
+    # Адресует отправление в URL и возвращается в payload.
+    # Immutable (editable=False) и server-generated: значение выдаёт
+    # SEQUENCE в save(), клиент его не задаёт и не меняет.
+    shipment_number = models.CharField(
+        verbose_name='Номер отправления',
+        max_length=20,
+        unique=True,
+        editable=False,
+        blank=True,
+        help_text='Публичный номер отправления (SHP-00000001).',
+    )
+
+    # Числовой счётчик публичного номера (значение из SEQUENCE).
+    # Храним отдельно, чтобы не парсить строку 'SHP-00000001'.
+    _shipment_number_seq = models.PositiveBigIntegerField(
+        editable=False,
+        db_index=True,
+        null=True,
+        blank=True,
+    )
+
     # ── Внутренний трек-номер ──
+    # ВНУТРЕННЕЕ поле: не является публичным идентификатором и НЕ попадает
+    # в публичные serializers (F-8, #73). Оставлено для внутренних
+    # процессов склада и совместимости с исторической выдачей.
     # Автогенерируемый: SHP-00000001
     internal_tracking = models.CharField(
         verbose_name='Внутренний трек',
@@ -205,7 +294,7 @@ class Shipment(BaseModel):
 
     def __str__(self):
         return (
-            f'{self.internal_tracking} '
+            f'{self.shipment_number} '
             f'({self.get_status_display()}) '
             f'— Order #{self.order_id}'
         )
@@ -217,8 +306,19 @@ class Shipment(BaseModel):
 
     def save(self, *args, **kwargs):
         """
-        Переопределённый save() — авто-генерация internal_tracking.
+        Переопределённый save() — авто-генерация публичного номера и
+        внутреннего трека.
+
+        shipment_number выдаётся SEQUENCE (ADR-005-подобный механизм) и
+        неизменяем: однажды присвоенный номер никогда не перезаписывается,
+        потому что он является публичным идентификатором ресурса.
         """
+        if not self.shipment_number:
+            using = kwargs.get('using')
+            seq_value, number = allocate_shipment_number(using=using)
+            self._shipment_number_seq = seq_value
+            self.shipment_number = number
+
         if not self.internal_tracking:
             max_seq = Shipment.objects.aggregate(
                 max_seq=models.Max('_tracking_seq'),

@@ -132,6 +132,10 @@ class PaginationContractTests(CatalogTestCase):
         Each item is ``(label, url, user, base_params)``. ``base_params`` are the
         query parameters required to observe an existing collection for that
         endpoint (for example ``product_id`` for the public reviews list).
+
+        The per-resource identity key used by the stability assertions lives
+        in ``IDENTITY_KEYS`` — after F-8 (#73) not every resource is
+        addressed by ``id`` (shipments use ``shipment_number``).
         """
         price_history_url = reverse(
             'pricing:variant-price-history',
@@ -153,9 +157,19 @@ class PaginationContractTests(CatalogTestCase):
             ('notifications', reverse('notifications:notification-list'), self.user, {}),
             ('notifications-unread', reverse('notifications:notification-unread'), self.user, {}),
             ('reviews', reverse('reviews:review-list'), None, {
-                'product_id': self.product.pk,
+                'product_id': str(self.product.uuid),
             }),
         ]
+
+    # F-8 (#73): канонический идентификатор элемента коллекции по ресурсу.
+    # Значение по умолчанию — 'id'; переопределяется там, где контракт
+    # заморозил другой публичный ключ.
+    IDENTITY_KEYS = {
+        'shipments': 'shipment_number',
+    }
+
+    def _identity_key(self, label):
+        return self.IDENTITY_KEYS.get(label, 'id')
 
     def _request_paginated(self, url, user, base_params, params):
         """Issue a request to a paginated endpoint with merged query params."""
@@ -308,7 +322,7 @@ class PaginationContractTests(CatalogTestCase):
         reviewless_product = self.products[1]
         response = self.client.get(
             reverse('reviews:review-list'),
-            {'product_id': reviewless_product.pk},
+            {'product_id': str(reviewless_product.uuid)},
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['count'], 0)
@@ -389,13 +403,14 @@ class PaginationContractTests(CatalogTestCase):
                     continue
                 self.assertEqual(len(page_one.data['results']), 1)
                 self.assertEqual(len(page_two.data['results']), 1)
-                first_ids = {item['id'] for item in page_one.data['results']}
-                second_ids = {item['id'] for item in page_two.data['results']}
+                key = self._identity_key(label)
+                first_ids = {item[key] for item in page_one.data['results']}
+                second_ids = {item[key] for item in page_two.data['results']}
                 self.assertFalse(first_ids & second_ids)
                 # Re-requesting the first page yields the identical item.
                 page_one_repeat = self.client.get(url, {**base_params, 'page': 1, 'page_size': 1})
                 self.assertEqual(
-                    [item['id'] for item in page_one_repeat.data['results']],
+                    [item[key] for item in page_one_repeat.data['results']],
                     list(first_ids),
                 )
 
@@ -446,11 +461,11 @@ class PaginationContractTests(CatalogTestCase):
         product_url = reverse('reviews:review-list')
         default = self.client.get(
             product_url,
-            {'product_id': self.product.pk, 'page': 1, 'page_size': 1},
+            {'product_id': str(self.product.uuid), 'page': 1, 'page_size': 1},
         )
         helpful = self.client.get(
             product_url,
-            {'product_id': self.product.pk, 'ordering': 'helpful', 'page': 1, 'page_size': 1},
+            {'product_id': str(self.product.uuid), 'ordering': 'helpful', 'page': 1, 'page_size': 1},
         )
         self.assertEqual(default.status_code, status.HTTP_200_OK)
         self.assertEqual(helpful.status_code, status.HTTP_200_OK)
