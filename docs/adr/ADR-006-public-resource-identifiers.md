@@ -106,12 +106,19 @@ Rules:
    not a silent empty result. An unresolvable but well-formed identifier keeps
    the existing `404` / empty-collection semantics, so the 404-not-403
    ownership policy is unaffected.
-6. Responses carry the public identifier.
+6. **Identifier parsing is ASCII-strict.** The `ORD-`/`SHP-` patterns and the
+   legacy-PK parser accept `[0-9]` only, never Python's `\d` /
+   `str.isdigit()`, both of which also match non-ASCII digits. A legacy PK must
+   additionally be a positive integer within `bigint` range. Anything else can
+   never identify a row and therefore yields the canonical `404` — it must not
+   reach `int()` or the database.
+7. Responses carry the public identifier.
 
 Shared primitives live in `apps/core/identifiers.py`
 (`OrderReferenceSerializerMixin`, `order_reference_filters`, `is_order_number`,
-`is_shipment_number`, `parse_uuid`) so no bounded context re-implements the
-parsing rules.
+`is_shipment_number`, `parse_legacy_pk`, `parse_uuid`) so no bounded context
+re-implements the parsing rules — in particular, no view calls bare `int()` on
+a client-supplied path segment.
 
 ## Rationale
 
@@ -142,6 +149,9 @@ prevents the window from creating a second, silent precedence rule of its own.
 * Internal PK values are no longer required knowledge for any API workflow.
 * Malformed identifiers now fail loudly (`400`) instead of degrading into an
   empty list, closing the reviews half of G-14's silent-failure behaviour.
+* ASCII-strict parsing removes a `500` (a superscript digit such as `²` passes
+  `str.isdigit()` but crashes `int()`) and an aliasing bug (Arabic-Indic `٤٢`
+  resolving to the same row as `42`), in the same spirit as F-1 (#85).
 * G-23 is closed; §7 of `docs/api/API_CONTRACT.md` moves from
   "❓ DECISION REQUIRED" to a frozen contract.
 

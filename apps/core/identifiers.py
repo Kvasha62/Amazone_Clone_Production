@@ -40,10 +40,23 @@ from rest_framework import serializers
 # ``ORD-`` + zero-padded sequence (apps.orders.constants.ORDER_NUMBER_PREFIX /
 # ORDER_NUMBER_DIGITS).  Kept as a permissive "one or more digits" pattern so a
 # sequence that grows past the padding width still matches.
-ORDER_NUMBER_RE = re.compile(r'^ORD-\d+$')
+ORDER_NUMBER_RE = re.compile(r'^ORD-[0-9]+$')
 
 # ``SHP-`` + zero-padded sequence (apps.shipping.constants).
-SHIPMENT_NUMBER_RE = re.compile(r'^SHP-\d+$')
+SHIPMENT_NUMBER_RE = re.compile(r'^SHP-[0-9]+$')
+
+# Строго ASCII-цифры. НЕ ``str.isdigit()``: тот пропускает не-ASCII цифры
+# (``'٤٢'.isdigit()`` → True, ``int('٤٢')`` → 42), из-за чего арабо-индийские
+# цифры резолвились бы в тот же PK, что и ASCII-запись — лишний, ничем не
+# оправданный способ адресовать один и тот же объект. Хуже того, ``isdigit()``
+# пропускает и надстрочные цифры (``'²'``), на которых ``int()`` уже падает
+# с ``ValueError`` → 500 вместо канонического 404.
+ASCII_DIGITS_RE = re.compile(r'^[0-9]+$')
+
+# Верхняя граница PostgreSQL ``bigint`` (Django BigAutoField). Значение выше
+# не может существовать в БД, а psycopg отвергает его на уровне протокола
+# (``NumericValueOutOfRange``) — то есть 500 вместо 404. Отсекаем заранее.
+MAX_BIGINT_PK = 9223372036854775807
 
 # Максимальная длина публичных идентификаторов — совпадает с max_length
 # соответствующих полей модели (Order.order_number, Shipment.internal_tracking).
@@ -58,6 +71,26 @@ def is_order_number(value: object) -> bool:
 def is_shipment_number(value: object) -> bool:
     """True, если ``value`` выглядит как публичный номер отправления ``SHP-00000001``."""
     return bool(SHIPMENT_NUMBER_RE.match(str(value or '')))
+
+
+def parse_legacy_pk(value: object) -> int | None:
+    """Возвращает целочисленный PK из устаревшего строкового идентификатора.
+
+    Принимает ТОЛЬКО строку из ASCII-цифр (``'42'`` → ``42``). Всё остальное —
+    пустая строка, отрицательное число, не-ASCII цифры, надстрочные знаки,
+    любой мусор — даёт ``None``; вызывающий код обязан превратить это в
+    канонический 404, а не в 500.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 < value <= MAX_BIGINT_PK else None
+    if not ASCII_DIGITS_RE.match(str(value or '')):
+        return None
+    parsed = int(value)
+    if parsed <= 0 or parsed > MAX_BIGINT_PK:
+        return None
+    return parsed
 
 
 def parse_uuid(value: object) -> uuid_module.UUID | None:

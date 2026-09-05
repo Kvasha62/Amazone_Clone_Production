@@ -494,11 +494,16 @@ drift between the two list endpoints is closed.
    integer fields that are already in payloads (`order_id` in the discounts
    mini-payload, `id` on shipments, `product_id` on reviews) stay for the same
    deprecation window.
+6. **Parsing is ASCII-strict.** `ORD-`/`SHP-` patterns and the legacy integer
+   parser match `[0-9]` only (never `\d` / `str.isdigit()`, which also accept
+   non-ASCII digits), and a legacy PK must be a positive `bigint`. Values that
+   cannot identify a row yield the canonical `404` and never reach `int()` or
+   the database — so a superscript digit is a `404`, not a `500`.
 
 Shared primitives live in `apps/core/identifiers.py`
 (`OrderReferenceSerializerMixin`, `order_reference_filters`, `is_order_number`,
-`is_shipment_number`, `parse_uuid`) so every bounded context resolves these
-identifiers identically. Cross-context invariants are covered by
+`is_shipment_number`, `parse_legacy_pk`, `parse_uuid`) so every bounded context
+resolves these identifiers identically. Cross-context invariants are covered by
 `apps/core/tests/test_identifier_contract.py`.
 
 ---

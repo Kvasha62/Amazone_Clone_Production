@@ -25,9 +25,11 @@ from rest_framework.test import APIClient
 
 from apps.catalog.tests.factories import CatalogTestCase
 from apps.core.identifiers import (
+    MAX_BIGINT_PK,
     is_order_number,
     is_shipment_number,
     order_reference_filters,
+    parse_legacy_pk,
     parse_uuid,
 )
 from apps.orders.tests.factories import create_test_order, create_test_user
@@ -57,6 +59,50 @@ class IdentifierHelpersTests(TestCase):
         self.assertIsNone(parse_uuid('not-a-uuid'))
         self.assertIsNone(parse_uuid(None))
         self.assertIsNone(parse_uuid(7))
+
+    def test_public_number_patterns_are_ascii_only(self):
+        """``\\d`` в Python-регексе матчит не-ASCII цифры — паттерны на [0-9].
+
+        Без этого ``ORD-٠٠٠٠٠١`` считался бы валидным номером заказа и уходил
+        в БД как «канонический» идентификатор, которого там быть не может.
+        """
+        self.assertFalse(is_order_number('ORD-٠٠٠٠٠١'))
+        self.assertFalse(is_shipment_number('SHP-٠٠٠٠٠٠٠١'))
+        self.assertTrue(is_order_number('ORD-000001'))
+        self.assertTrue(is_shipment_number('SHP-00000001'))
+
+    def test_parse_legacy_pk_accepts_ascii_digits(self):
+        self.assertEqual(parse_legacy_pk('42'), 42)
+        self.assertEqual(parse_legacy_pk(42), 42)
+        self.assertEqual(parse_legacy_pk(str(MAX_BIGINT_PK)), MAX_BIGINT_PK)
+
+    def test_parse_legacy_pk_rejects_non_ascii_digits(self):
+        """``str.isdigit()`` пропускает не-ASCII цифры — ``parse_legacy_pk`` нет.
+
+        ``'٤٢'`` (арабо-индийские цифры) не должно быть вторым способом
+        адресовать PK 42, а ``'²'`` роняло ``int()`` с ``ValueError``.
+        """
+        self.assertTrue('٤٢'.isdigit())
+        self.assertTrue('²'.isdigit())
+        self.assertIsNone(parse_legacy_pk('٤٢'))
+        self.assertIsNone(parse_legacy_pk('²'))
+
+    def test_parse_legacy_pk_rejects_out_of_range_and_garbage(self):
+        self.assertIsNone(parse_legacy_pk(MAX_BIGINT_PK + 1))
+        self.assertIsNone(parse_legacy_pk(str(MAX_BIGINT_PK + 1)))
+        self.assertIsNone(parse_legacy_pk('0'))
+        self.assertIsNone(parse_legacy_pk(0))
+        self.assertIsNone(parse_legacy_pk('-1'))
+        self.assertIsNone(parse_legacy_pk(-1))
+        self.assertIsNone(parse_legacy_pk('4.2'))
+        self.assertIsNone(parse_legacy_pk(''))
+        self.assertIsNone(parse_legacy_pk(None))
+        self.assertIsNone(parse_legacy_pk('not-a-pk'))
+
+    def test_parse_legacy_pk_rejects_bool(self):
+        """``True`` — это ``int`` в Python; PK из него получаться не должен."""
+        self.assertIsNone(parse_legacy_pk(True))
+        self.assertIsNone(parse_legacy_pk(False))
 
     def test_order_reference_filters(self):
         self.assertEqual(

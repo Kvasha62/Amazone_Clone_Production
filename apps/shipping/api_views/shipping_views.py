@@ -34,7 +34,11 @@ from apps.core.pagination import (
 )
 from apps.core.serializers import PaginationResponseSerializer
 
-from apps.core.identifiers import is_shipment_number, order_reference_filters
+from apps.core.identifiers import (
+    is_shipment_number,
+    order_reference_filters,
+    parse_legacy_pk,
+)
 from apps.orders.models import Order
 from apps.shipping.models import Shipment, ShippingMethod
 from apps.shipping.serializers import (
@@ -63,28 +67,35 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _shipment_lookup(shipment: str) -> dict:
+def _shipment_lookup(shipment: str) -> dict | None:
     """ORM-фильтр по публичному идентификатору отправления (F-8, #73).
 
     ``SHP-00000001`` → ``{'internal_tracking': 'SHP-00000001'}``
     ``"42"``         → ``{'pk': 42}`` (DEPRECATED: сырой целочисленный PK)
 
-    Любое другое значение никогда не совпадёт ни с одним отправлением —
-    возвращаем заведомо пустой фильтр, чтобы вызывающий код отдал
-    канонический ``404 not_found`` (а не 500 на приведении типов).
+    ``None`` — значение не является ни публичным номером, ни допустимым PK и
+    поэтому не может соответствовать ни одному отправлению. Возвращаем
+    именно ``None``, а не «заведомо пустой фильтр»: фильтр вида
+    ``{'pk': None}`` пришлось бы отличать от валидного по значению внутри
+    словаря, и такая проверка ломается при первом же добавлении нового
+    вида идентификатора. Вызывающий код обязан превратить ``None`` в
+    канонический ``404 not_found``.
     """
     value = str(shipment)
     if is_shipment_number(value):
         return {'internal_tracking': value}
-    if value.isdigit():
-        return {'pk': int(value)}
-    return {'pk': None}
+
+    legacy_pk = parse_legacy_pk(value)
+    if legacy_pk is not None:
+        return {'pk': legacy_pk}
+
+    return None
 
 
 def _get_shipment(queryset, shipment: str) -> Shipment:
     """Возвращает отправление по публичному идентификатору либо 404."""
     lookup = _shipment_lookup(shipment)
-    if lookup.get('pk', True) is None:
+    if lookup is None:
         raise NotFound('Отправление не найдено.')
     try:
         return queryset.get(**lookup)

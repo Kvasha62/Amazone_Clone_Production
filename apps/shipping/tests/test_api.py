@@ -245,6 +245,33 @@ class ShipmentDetailAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data['error']['code'], 'not_found')
 
+    def test_detail_hostile_identifiers_return_404_not_500(self):
+        """Враждебные сегменты пути → канонический 404, никогда не 500.
+
+        Регрессия: ``str.isdigit()`` пропускает не-ASCII цифры, поэтому
+        надстрочная ``'²'`` доходила до ``int()`` и роняла view с
+        ``ValueError`` → 500, а арабо-индийская ``'٤٢'`` резолвилась в PK 42,
+        давая второй, незадокументированный способ адресовать объект.
+        Переполнение bigint отвергается до похода в БД.
+        """
+        hostile = {
+            'superscript_digit': '²',
+            'arabic_indic_digits': '٤٢',
+            'bigint_overflow': '9' * 40,
+            'zero_pk': '0',
+            'negative_pk': '-1',
+        }
+        for label, segment in hostile.items():
+            with self.subTest(identifier=label):
+                url = f'/api/v1/shipping/shipments/{segment}/'
+                response = self.client.get(url)
+                self.assertEqual(
+                    response.status_code,
+                    status.HTTP_404_NOT_FOUND,
+                    msg=f'{label} -> {response.status_code}',
+                )
+                self.assertEqual(response.data['error']['code'], 'not_found')
+
     def test_detail_not_found(self):
         """NotFound для несуществующего отправления."""
         url = reverse(
