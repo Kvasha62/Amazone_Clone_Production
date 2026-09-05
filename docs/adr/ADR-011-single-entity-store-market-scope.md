@@ -25,7 +25,9 @@
 
 The first release has no historical Product → Store ownership field. Introducing the explicit relation requires a fail-closed preflight against the existing data and repository semantics.
 
-The migration may establish the existing Products as owned by the single active Store only after the preflight confirms that the existing production model contains no conflicting multi-store commercial ownership semantics. Seed data alone is not sufficient evidence.
+The preflight must confirm that the existing production model contains no conflicting multi-store commercial ownership semantics. Seed data alone is not sufficient evidence.
+
+Only after that preflight succeeds may existing Products be associated with the single active Store as the first-release commercial owner.
 
 If conflicting ownership evidence is found, the migration stops and a new architecture/data decision is required.
 
