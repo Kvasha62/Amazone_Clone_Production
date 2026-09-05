@@ -80,6 +80,7 @@ class Migration(migrations.Migration):
                 (
                     "minor_units",
                     models.PositiveSmallIntegerField(
+                        help_text="Number of decimal places used by the currency.",
                         verbose_name="Minor units",
                         validators=[MinValueValidator(0), MaxValueValidator(6)],
                     ),
