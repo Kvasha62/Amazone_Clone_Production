@@ -41,6 +41,8 @@ TEST_APP_LABELS = [
     'apps.wishlist.tests',
     'apps.notifications.tests',
     'apps.analytics.tests',
+    'apps.currencies.tests',
+    'apps.merchants.tests',
 ]
 
 
