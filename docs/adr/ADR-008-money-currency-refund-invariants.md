@@ -167,6 +167,12 @@ Before removal of the legacy currency authority, a read-only preflight must prov
 
 No FX conversion is permitted as a migration mechanism. Existing monetary amounts are never silently changed merely to satisfy the new currency model.
 
+### 12. Product Ownership Bootstrap
+
+The first-release catalog schema explicitly assigns each `Product` to one `Store`. Existing Products may be associated with the sole active Store only after a read-only preflight confirms that the existing production model contains no conflicting multi-store commercial ownership semantics. Seed data alone is not sufficient evidence.
+
+This ownership bootstrap establishes current commercial ownership; it is not historical monetary evidence and must never be used to backfill legacy `PriceHistory.currency`.
+
 ## Consequences
 
 ### Positive
@@ -185,7 +191,7 @@ No FX conversion is permitted as a migration mechanism. Existing monetary amount
 - Payment provider abstraction and routing become explicit architectural components.
 - Existing RUB-specific validation/messages and factories require migration.
 - Refund recovery logic must understand base and charged currency separately.
-- Existing Price data requires a migration preflight before the legacy currency field can be removed.
+- Existing Product/Price data requires read-only preflight checks before legacy fields can be removed.
 
 ## Non-goals
 
@@ -203,6 +209,7 @@ This ADR does not select a concrete FX vendor, payment provider, tax regime, mar
 8. Price currency must resolve through Product → Store → LegalEntity → Accounting Currency and must not be independently selected.
 9. Legacy PriceHistory currency may remain NULL when unprovable; new PriceHistory currency is mandatory and immutable.
 10. Legacy Price migration must fail closed when compatibility with the authoritative Accounting Currency cannot be proven.
+11. Product ownership migration must fail closed when conflicting commercial ownership evidence exists.
 
 ## Related
 
