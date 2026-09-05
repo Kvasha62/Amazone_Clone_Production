@@ -18,6 +18,10 @@ Accounting Currency belongs to the selling **LegalEntity**, not to a product var
 
 A `Store` is a commercial storefront/channel owned by a `LegalEntity`. A `StoreMarket` describes where and how that storefront sells. The initial deployment remains single-entity/single-store, but the legal-entity boundary is explicit.
 
+**Accepted commercial ownership path:** a `Product` is commercially owned by exactly one `Store`. `ProductVariant` and its `Price` inherit that commercial ownership through the Product. Therefore the authoritative current pricing currency is resolved as:
+
+`Price → ProductVariant → Product → Store → LegalEntity → accounting_currency`
+
 `LegalEntity.accounting_currency` is the source of truth for internal commercial calculations. Orders and payments copy the relevant currency into immutable historical facts.
 
 A change of accounting currency for an existing LegalEntity with financial history is not an in-place rewrite of historical facts. The preferred policy is to create a new LegalEntity for a new accounting currency; if temporal configuration is ever required, it must still never mutate historical facts.
@@ -77,7 +81,7 @@ The registry provides at least:
 
 Currency-dependent rounding and minimum/maximum amount validation must use the currency's minor-unit rules rather than RUB-specific assumptions.
 
-`Price.currency` must not remain the source of truth for commercial currency. Pricing is denominated in the LegalEntity's Accounting Currency.
+`Price.currency` must not remain the source of truth for commercial currency. Pricing is denominated in the owning LegalEntity's Accounting Currency.
 
 ### 6. Payment Providers
 
@@ -140,6 +144,29 @@ Changing prices, shipping tariffs, discounts, provider configuration, currency c
 
 Retries of a failed refund may create a new provider execution attempt and a new execution FX snapshot where required, but they must preserve the underlying refund obligation and must not silently reduce the buyer's entitled amount.
 
+### 10. Legacy PriceHistory Currency
+
+Existing `PriceHistory` rows may have no persisted historical currency. Such a row is historically **unknown**, represented by nullable currency in the historical model.
+
+A legacy row may be backfilled only when a read-only forensic/data audit establishes authoritative evidence for that exact historical fact. The following are explicitly not evidence:
+
+- the current `Price.currency` value;
+- the current LegalEntity/Store configuration;
+- model defaults;
+- seed data or seed assumptions.
+
+Unknown legacy rows remain `NULL`. No blanket RUB backfill, no current-state copy, and no FX conversion is permitted.
+
+Every newly-created `PriceHistory` record must capture the authoritative Accounting Currency snapshot at creation time. Historical currency is immutable once established.
+
+### 11. Legacy Price Migration
+
+The legacy per-`Price` currency field is not migrated by converting or rewriting monetary amounts.
+
+Before removal of the legacy currency authority, a read-only preflight must prove that every existing `Price` amount is compatible with the Accounting Currency of its commercial owner. If any existing row is incompatible, ambiguous, or cannot be safely established as compatible, the migration must stop.
+
+No FX conversion is permitted as a migration mechanism. Existing monetary amounts are never silently changed merely to satisfy the new currency model.
+
 ## Consequences
 
 ### Positive
@@ -149,6 +176,7 @@ Retries of a failed refund may create a new provider execution attempt and a new
 - Accounting currency is separated cleanly from payment currency.
 - FX and provider-specific behavior are kept outside Order/Price/Cart domains.
 - Multiple partial refunds can be represented as separate auditable operations.
+- Product commercial ownership and pricing currency have one explicit authoritative path.
 
 ### Negative / Cost
 
@@ -157,6 +185,7 @@ Retries of a failed refund may create a new provider execution attempt and a new
 - Payment provider abstraction and routing become explicit architectural components.
 - Existing RUB-specific validation/messages and factories require migration.
 - Refund recovery logic must understand base and charged currency separately.
+- Existing Price data requires a migration preflight before the legacy currency field can be removed.
 
 ## Non-goals
 
@@ -171,6 +200,9 @@ This ADR does not select a concrete FX vendor, payment provider, tax regime, mar
 5. No implementation may bypass the Payment Service/provider port with direct provider calls from Order.
 6. All new monetary API representations must expose currency explicitly.
 7. All completed monetary facts must have tests proving historical immutability.
+8. Price currency must resolve through Product → Store → LegalEntity → Accounting Currency and must not be independently selected.
+9. Legacy PriceHistory currency may remain NULL when unprovable; new PriceHistory currency is mandatory and immutable.
+10. Legacy Price migration must fail closed when compatibility with the authoritative Accounting Currency cannot be proven.
 
 ## Related
 
@@ -180,4 +212,6 @@ This ADR does not select a concrete FX vendor, payment provider, tax regime, mar
 - ADR-004: Secure and Idempotent Payment Webhooks
 - ADR-005: Public Resource Identity
 - ADR-006: API v1 Contract and Freeze Governance
+- ADR-009: Currency Registry and Monetary Precision
+- ADR-011: Single LegalEntity, Store and StoreMarket in First Release
 - Issue #75: Multi-currency money and original-currency refund contract
