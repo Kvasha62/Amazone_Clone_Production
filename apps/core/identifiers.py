@@ -9,22 +9,32 @@ API-01 documented gap **G-23** ("identifier drift across bounded contexts"):
 * order URLs use the public ``order_number`` (``ORD-000001``) but
   ``POST /payments/``, ``POST /discounts/apply|remove/`` and
   ``POST /shipping/shipments/create/`` took the integer ``order_id``;
-* shipment routes exposed the raw integer PK in the path;
-* reviews accepted both ``product_id`` (int PK) and ``product_uuid``.
+* shipment routes exposed the raw integer PK in the path, and the resource had
+  no public identifier at all — only the internal ``internal_tracking`` field;
+* reviews accepted both ``product_id`` (int PK) and ``product_uuid``;
+* payment stored its ``PAY-`` number in a field named ``order_number``.
 
 Frozen contract (F-8)
 ---------------------
 1. **Order** — the public identifier is ``order_number`` (``ORD-000001``)
    in *paths and request bodies alike*.  The integer PK is internal.
-2. **Shipment** — the public identifier is ``internal_tracking``
-   (``SHP-00000001``).  The integer PK is internal.
-3. **Product** — the public identifier is the **UUID**.  Catalog payloads keep
+2. **Shipment** — the public identifier is ``shipment_number``
+   (``SHP-00000001``), a dedicated immutable column.  ``internal_tracking`` is
+   internal and never serialized publicly; ``tracking_number`` is the
+   **external** carrier code.  The integer PK is internal.
+3. **Payment** — identity is ``payment_number`` (``PAY-000001``); the order
+   reference is ``order_number``; ``external_id`` is provider-side only.
+4. **Product** — the public identifier is the **UUID**.  Catalog payloads keep
    serializing it as ``id`` (that is normative, not a bug), and reviews
-   reference products by UUID.
-4. **Legacy integer references stay accepted for one deprecation window.**
-   ``order_id`` / ``product_id`` request fields and numeric shipment path
-   segments keep working, but they are deprecated: clients must migrate to the
-   public identifiers above.  Responses always echo the public identifier.
+   reference products by ``product_id``, *typed as UUID* — there is no
+   competing ``product_uuid`` field.
+5. **One deprecation window, for ``order_id`` only.**  That request field keeps
+   working but is deprecated; passing it together with ``order_number`` is a
+   ``400``.  No other legacy integer reference is honoured: an integer shipment
+   path segment (``404``) and an integer ``product_id`` (``400``) were never
+   public identifiers, so accepting them would recreate the enumerable second
+   addressing scheme this contract removes.  Responses always echo the public
+   identifier.
 
 This module holds the shared primitives so every bounded context resolves
 those identifiers identically.
@@ -59,7 +69,8 @@ ASCII_DIGITS_RE = re.compile(r'^[0-9]+$')
 MAX_BIGINT_PK = 9223372036854775807
 
 # Максимальная длина публичных идентификаторов — совпадает с max_length
-# соответствующих полей модели (Order.order_number, Shipment.internal_tracking).
+# соответствующих полей модели (Order.order_number, Shipment.shipment_number,
+# Payment.payment_number).
 PUBLIC_IDENTIFIER_MAX_LENGTH = 20
 
 

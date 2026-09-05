@@ -512,6 +512,24 @@ Shared primitives live in `apps/core/identifiers.py`
 resolves these identifiers identically. Cross-context invariants are covered by
 `apps/core/tests/test_identifier_contract.py`.
 
+#### 7.1 Client migration — breaking changes in F-8
+
+Freezing the contract corrected three payloads that contradicted it. These are
+**breaking** for clients relying on the previous (incorrect) behaviour; they
+are not covered by a deprecation window because the old behaviour was not a
+supported contract, it was a defect.
+
+| Change | Before | After | What a client must do |
+|---|---|---|---|
+| Payment payload key | `order_number` carried the **payment** number (`PAY-…`); no order reference existed | `payment_number` carries `PAY-…`; `order_number` carries the **order's** `ORD-…` | Read the payment identity from `payment_number`. Anything that stored the old `order_number` value is holding a payment number. |
+| Shipment addressing | `/shipments/{int_pk}/` and `/shipments/{internal_tracking}/` resolved | Only `/shipments/{shipment_number}/` resolves; others → `404` | Address shipments by `shipment_number` from the list/detail payload. |
+| Shipment payload | `internal_tracking` and integer `id` were emitted | Neither is emitted; `shipment_number` is | Replace any use of `internal_tracking` as an identifier with `shipment_number`. `tracking_number` is unchanged and remains the carrier code. |
+| Review product reference | `product_uuid` (UUID) *and* `product_id` (int PK) both accepted | Only `product_id`, typed as **UUID** | Send the product UUID as `product_id`; drop `product_uuid`. An integer `product_id` now returns `400`. |
+
+Unchanged: `order_number` as the cross-context order reference, the deprecated
+`order_id` field, and the public `/shipping/track/{tracking}/` route (external
+carrier `tracking_number` only).
+
 ---
 
 ## 8. Money / Decimal and timestamp conventions

@@ -294,3 +294,27 @@ class PaymentIdentifierContractTests(TestCase):
         self.assertEqual(
             response.data['order_number'], self.order.order_number,
         )
+
+
+class IdentifierObservabilityContractTests(TestCase):
+    """Публичные идентификаторы должны переживать фильтрацию логов.
+
+    ``SAFE_LOG_FIELDS`` — allow-list: ключ, которого в нём нет, молча
+    выбрасывается из структурированной записи. Поэтому переименование
+    публичного идентификатора обязано сопровождаться правкой списка,
+    иначе операционные логи тихо теряют корреляционный ключ — отказ,
+    который не проявляется ни в одном функциональном тесте.
+    """
+
+    def test_public_identifier_log_keys_are_allow_listed(self):
+        from apps.core.observability import SAFE_LOG_FIELDS
+
+        for key in ('order_number', 'payment_number', 'shipment_number'):
+            with self.subTest(key=key):
+                self.assertIn(key, SAFE_LOG_FIELDS)
+
+    def test_retired_product_uuid_key_is_not_allow_listed(self):
+        """product_uuid упразднён (F-8, #73) — мёртвый ключ не тянем."""
+        from apps.core.observability import SAFE_LOG_FIELDS
+
+        self.assertNotIn('product_uuid', SAFE_LOG_FIELDS)
