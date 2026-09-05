@@ -250,6 +250,7 @@ INSTALLED_APPS = [
     "apps.notifications",
     "apps.analytics",
     "apps.currencies",
+    "apps.merchants",
 ]
 
 # ── PostgreSQL: единственная поддерживаемая БД ──
