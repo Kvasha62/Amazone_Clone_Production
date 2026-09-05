@@ -320,8 +320,10 @@ internal text. They are not converted into `400`.
 
 ### 5.6 Exceptions to the envelope
 
-* **`GET /api/v1/health/`** (§9.14) is a plain Django `View`. `200`/`503`
-  bodies stay `{status, version, database}` — not the error envelope.
+* **`GET /api/v1/health/`** (§9.14) is a public DRF endpoint with a dedicated
+  success/degraded contract. Its `200`/`503` bodies stay
+  `{status, version, database}` and are explicitly excluded from the common
+  API error envelope.
 * **`GET /api/v1/schema/`** and **`GET /api/v1/docs/`** (§9.15) are schema/docs
   endpoints, not API resources.
 * **Payment webhook success-path `200`** payloads (`PaymentSerializer`, or
@@ -1223,14 +1225,41 @@ closed.
 
 ### 9.14 Health (`apps.core`)
 
-**83. `GET /api/v1/health/`** — **Public**, and served by a plain Django `View`
-(`JsonResponse`), *not* by DRF: no JWT parsing, no throttling, no DRF renderer,
-no OpenAPI schema entry ⚠️ **GAP**.
-`200 {"status": "ok", "version": "1.0.0", "database": "ok"}` when
-`connection.ensure_connection()` succeeds;
-`503 {"status": "degraded", "version": "1.0.0", "database": "error"}` when it
-raises `django.db.Error`. `version` is a **hard-coded literal**, not derived
-from the release ⚠️ **GAP**. Only `GET` is allowed (`405` otherwise).
+**83. `GET /api/v1/health/`** — **Public**, read-only and idempotent. Served by
+DRF `APIView` / `Response`, with explicit `AllowAny`, no authentication classes
+(no JWT parsing), and no application-level throttling. No request body, path
+parameters or query parameters. Write methods return `405`.
+
+When `connection.ensure_connection()` succeeds, HTTP **`200`**:
+
+```json
+{"status": "ok", "version": "<canonical-release-version>", "database": "ok"}
+```
+
+When that check raises **`django.db.Error`**, HTTP **`503`**:
+
+```json
+{"status": "degraded", "version": "<canonical-release-version>", "database": "error"}
+```
+
+All three fields are required strings in both responses. `version` is read
+from **`settings.SPECTACULAR_SETTINGS["VERSION"]`** in `config/settings.py`, the
+existing configured version also used by OpenAPI `info.version` (currently
+`1.0.0`). The repository has no separate package/release version source; health
+reuses this existing authority rather than introducing another version setting,
+hard-coded endpoint literal, or runtime Git lookup.
+
+Only `django.db.Error` is converted into `503 degraded`. Unexpected programming
+or configuration exceptions (`RuntimeError`, `TypeError`, `AttributeError`,
+`ImproperlyConfigured`, etc.) propagate, preserving the F-17 exception boundary.
+Health uses DRF's default exception handler locally, not the common API handler.
+Its **special success/degraded contract is excluded from the common API error
+envelope** (§5.6); `503` is never wrapped in `{"error": ...}`.
+
+The generated OpenAPI explicitly documents both `200` and `503`, all three
+required fields, and the per-response singleton enums: `status=ok` /
+`database=ok` for `200`, `status=degraded` / `database=error` for `503`.
+The check remains database-only; no additional service probes are performed.
 
 ### 9.15 Schema & docs (drf-spectacular)
 
@@ -1437,7 +1466,8 @@ timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
 * `drf_spectacular` is installed and configured:
   `DEFAULT_SCHEMA_CLASS = "drf_spectacular.openapi.AutoSchema"`,
   `SPECTACULAR_SETTINGS = {TITLE: "Amazone Clone API", DESCRIPTION:
-  "Marketplace API", VERSION: "1.0.0", SERVE_INCLUDE_SCHEMA: False}`.
+  "Marketplace API", VERSION: "1.0.0", SERVE_INCLUDE_SCHEMA: False,
+  ENUM_NAME_OVERRIDES: {HealthOkEnum: ["ok"]}}`.
 * Schema is served live at `/api/v1/schema/` and Swagger UI at `/api/v1/docs/`.
 * Views are annotated with `@extend_schema` / `@extend_schema_view` for
   summaries, request serializers and (partly) response serializers.
@@ -1460,7 +1490,9 @@ timeout can duplicate business state. ❓ **DECISION REQUIRED (API-07).**
    listing) plus the shared API-05 `page`/`page_size` parameters on every
    paginated endpoint. Filters and inputs for reviews, analytics, shipping
    methods and inventory remain undocumented in the schema.
-5. **`/api/v1/health/` is a plain Django view** and is absent from the schema.
+5. **Health gap closed by F-9 (#74).** `/api/v1/health/` is a public DRF
+   endpoint with explicit `200` / `503` response schemas and required fields
+   (§9.14). Health and OpenAPI share the existing configured version source.
 6. The API-05 canonical pagination envelope is reflected in the schema via
    `PaginationResponseSerializer`; the item schemas inside `results` are
    generic (`JSONField`) until API-02 hardens schema generation.
@@ -1520,7 +1552,7 @@ the API-02…API-07 scope statements.
 | G-24 | Notification list vs unread list return different representations of the same resource | §9.12 | **API-05** |
 | G-25 | Analytics views bypass their own serializers; `metric`/`period` unvalidated | §9.13 | **API-02** (schema) + [#66](https://github.com/Kvasha62/Amazone_Clone_Production/issues/66) |
 | G-26 | Bespoke mini-payloads for discounts apply/remove and wishlist move-to-cart | §9.9, §9.11 | Out of API-04 error-envelope scope |
-| G-27 | `/api/v1/health/` is outside DRF and outside OpenAPI; `version` is hard-coded | §9.14 | **[F-9 (#74)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/74)** |
+| G-27 | Health DRF/OpenAPI boundary and version source | §9.14 | **Closed by [F-9 (#74)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/74)** — explicit public `200` / `503` contract; version shared with OpenAPI; excluded from the common error envelope |
 | G-28 | No currency field on order/payment/shipping money; single implicit currency | §8.1 | **[F-10 (#75)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/75)** |
 | G-29 | `POST /reviews/` returns `404` for a missing-identifier validation error | §9.8 | **Closed by API-04** (`400`) |
 | G-30 | `GET /orders/` has no staff-wide variant; `PATCH /orders/{n}/status/` is staff-only but there is no way for staff to list all orders via the API | §9.4 | **[F-11 (#76)](https://github.com/Kvasha62/Amazone_Clone_Production/issues/76)** |
@@ -1551,7 +1583,7 @@ API v1 **cannot be frozen** until the following are closed:
 
 | Ticket | Must resolve |
 |---|---|
-| **API-02 — OpenAPI contract** | Remove the optional `drf_spectacular` import fallbacks so schema generation is mandatory; annotate every response (no string-literal responses); document query parameters; include health; commit and CI-validate a schema artifact; decide on protecting `/schema/` and `/docs/`; invert the precedence rule in §12. Closes G-11, G-12, G-25. |
+| **API-02 — OpenAPI contract** | Remove the optional `drf_spectacular` import fallbacks so schema generation is mandatory; annotate every response (no string-literal responses); document query parameters; commit and CI-validate a schema artifact; decide on protecting `/schema/` and `/docs/`; invert the precedence rule in §12. Closes G-11, G-12, G-25. |
 | **API-03 — Authentication contract** | Logout / refresh-token revocation; explicit access-token no-blacklist policy; deterministic password change/reset lifecycle; account deactivation behaviour. Closes the logout portion of G-10; the `/cart/merge/` cookie coupling remains a separate follow-up. |
 | **API-04 — Error contract** | One error envelope with stable machine-readable codes; `400` body type consistency; `409` remains unused by design; production-safe `5xx`. Closes G-4, G-5, G-6, G-7, G-29. Success-path G-8/G-9/G-26/G-31 are out of this ticket. |
 | **API-05 — Collection/pagination contract** | One canonical pagination envelope; `page`/`page_size` as first-class parameters with deterministic bounds and API-04 invalid-value handling; deterministic ordering; paginate the 11 unbounded collections; unify notification representations. Closes G-1, G-2, G-3, G-24; resolves the `page`/`page_size` half of G-13. |

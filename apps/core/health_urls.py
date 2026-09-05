@@ -1,58 +1,80 @@
-# ────────────────────────────────────────────────────────────────────────
-# apps/core/health_urls.py — health-check для React.
-#
-# GET /api/v1/health/ → {"status": "ok", "version": "1.0.0"}
-#
-# React при запуске проверяет «живой ли бэкенд?».
-# Без этого фронтенд-разработчик не понимает:
-#   • Бэкенд не запущен?
-#   • Сеть недоступна?
-#   • Ошибка в API?
-# ────────────────────────────────────────────────────────────────────────
+"""Public API v1 database health check (F-9)."""
 
-from django.db import Error
-from django.http import JsonResponse
+from django.conf import settings
+from django.db import Error, connection
 from django.urls import path
-from django.views import View
+from drf_spectacular.utils import OpenApiResponse, extend_schema
+from rest_framework import serializers, status
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework.views import APIView, exception_handler as drf_exception_handler
 
 
-class HealthCheckView(View):
-    """
-    Health-check endpoint.
+class HealthSuccessSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=('ok',))
+    version = serializers.CharField()
+    database = serializers.ChoiceField(choices=('ok',))
 
-    GET /api/v1/health/
 
-    Возвращает:
-      {
-          "status": "ok",
-          "version": "1.0.0",
-          "database": "ok"
-      }
+class HealthDegradedSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=('degraded',))
+    version = serializers.CharField()
+    database = serializers.ChoiceField(choices=('error',))
 
-    Используется React-приложением для проверки доступности бэкенда.
-    """
 
+class HealthCheckView(APIView):
+    """Check only database connectivity; never mask non-database failures."""
+
+    permission_classes = (AllowAny,)
+    # Preserve the operational endpoint's independence from JWT and throttling.
+    authentication_classes = ()
+    throttle_classes = ()
+
+    def get_exception_handler(self):
+        # Health is outside the common API error envelope. DRF's default
+        # handler leaves unexpected exceptions unhandled, as the Django view did.
+        return drf_exception_handler
+
+    @extend_schema(
+        summary='Database health',
+        description=(
+            'Public, read-only database connection check. No authentication, '
+            'request body or parameters. Version comes from '
+            'SPECTACULAR_SETTINGS["VERSION"], shared with OpenAPI info.version. '
+            'Only django.db.Error produces 503; unexpected errors propagate. '
+            'The success/degraded payloads are excluded from the common API '
+            'error envelope.'
+        ),
+        request=None,
+        parameters=[],
+        auth=[],
+        responses={
+            200: OpenApiResponse(
+                response=HealthSuccessSerializer,
+                description='Database connection is available.',
+            ),
+            503: OpenApiResponse(
+                response=HealthDegradedSerializer,
+                description='Database connection failed with django.db.Error.',
+            ),
+        },
+    )
     def get(self, request):
-        # Проверяем что БД отвечает
         db_ok = True
         try:
-            from django.db import connection
             connection.ensure_connection()
         except Error:
-            # Health-контракт: недоступность БД → 503 degraded. Ловим
-            # только django.db.Error (database/operational failures), а не
-            # произвольные программные ошибки/конфигурационные сбои.
+            # Only database errors become degraded, never programming or
+            # configuration errors (the existing F-17 exception boundary).
             db_ok = False
 
-        status_code = 200 if db_ok else 503
-
-        return JsonResponse(
+        return Response(
             {
-                "status": "ok" if db_ok else "degraded",
-                "version": "1.0.0",
-                "database": "ok" if db_ok else "error",
+                'status': 'ok' if db_ok else 'degraded',
+                'version': settings.SPECTACULAR_SETTINGS['VERSION'],
+                'database': 'ok' if db_ok else 'error',
             },
-            status=status_code,
+            status=status.HTTP_200_OK if db_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
 
