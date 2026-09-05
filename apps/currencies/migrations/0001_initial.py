@@ -1,3 +1,4 @@
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import migrations, models
 
 
@@ -73,20 +74,14 @@ class Migration(migrations.Migration):
                     models.PositiveSmallIntegerField(
                         unique=True,
                         verbose_name="ISO numeric code",
-                        validators=[
-                            models.MinValueValidator(1),
-                            models.MaxValueValidator(999),
-                        ],
+                        validators=[MinValueValidator(1), MaxValueValidator(999)],
                     ),
                 ),
                 (
                     "minor_units",
                     models.PositiveSmallIntegerField(
                         verbose_name="Minor units",
-                        validators=[
-                            models.MinValueValidator(0),
-                            models.MaxValueValidator(6),
-                        ],
+                        validators=[MinValueValidator(0), MaxValueValidator(6)],
                     ),
                 ),
                 (
