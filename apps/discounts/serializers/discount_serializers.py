@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from apps.core.identifiers import OrderReferenceSerializerMixin
 from apps.discounts.models import Coupon
 
 
@@ -9,9 +10,23 @@ from apps.discounts.models import Coupon
 # INPUT
 # ==============================================================
 
-class ApplyCouponInputSerializer(serializers.Serializer):
+class ApplyCouponInputSerializer(OrderReferenceSerializerMixin):
+    """POST /api/v1/discounts/apply/.
+
+    ССЫЛКА НА ЗАКАЗ (F-8, issue #73):
+      order_number (``ORD-000001``) — канонический публичный идентификатор;
+      order_id — устаревший целочисленный PK (принимается, deprecated).
+    """
+
     code = serializers.CharField(max_length=50)
-    order_id = serializers.IntegerField()
+
+
+class RemoveCouponInputSerializer(OrderReferenceSerializerMixin):
+    """POST /api/v1/discounts/remove/.
+
+    Тело содержит только ссылку на заказ: order_number (канонический)
+    либо order_id (устар.).
+    """
 
 
 class PreviewDiscountInputSerializer(serializers.Serializer):

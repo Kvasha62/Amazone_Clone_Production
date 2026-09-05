@@ -25,15 +25,21 @@ from apps.reviews.models import Review
 # ==============================================================
 
 class CreateReviewInputSerializer(serializers.Serializer):
-    """POST /api/v1/reviews/"""
+    """POST /api/v1/reviews/
+
+    ИДЕНТИФИКАТОР ТОВАРА (F-8, issue #73):
+      product_uuid — канонический публичный идентификатор товара
+      (то же значение, что каталог отдаёт как ``id``);
+      product_id — устаревший целочисленный PK, принимается на окно
+      совместимости. Оба сразу → 400.
+    """
 
     product_id = serializers.IntegerField(
-        help_text='ID товара (числовой PK).',
+        help_text='DEPRECATED: целочисленный PK товара. Используйте product_uuid.',
         required=False,
     )
-    # 🔴 product_uuid — для React-фронтенда (фронтенд знает только UUID)
     product_uuid = serializers.UUIDField(
-        help_text='UUID товара (альтернатива product_id).',
+        help_text='UUID товара — канонический публичный идентификатор.',
         required=False,
     )
     rating = serializers.IntegerField(
@@ -54,10 +60,17 @@ class CreateReviewInputSerializer(serializers.Serializer):
     )
 
     def validate(self, data):
-        """Хотя бы один идентификатор товара обязателен."""
-        if not data.get('product_id') and not data.get('product_uuid'):
+        """Ровно один идентификатор товара (F-8, #73)."""
+        product_id = data.get('product_id')
+        product_uuid = data.get('product_uuid')
+
+        if product_id and product_uuid:
             raise serializers.ValidationError(
-                'Укажите product_id или product_uuid.',
+                'Укажите либо product_uuid, либо product_id (устар.), но не оба.',
+            )
+        if not product_id and not product_uuid:
+            raise serializers.ValidationError(
+                {'product_uuid': 'Обязательное поле.'},
             )
         return data
 
@@ -101,6 +114,11 @@ class ReviewListSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(
         source='user.email', read_only=True,
     )
+    # F-8 (#73): публичный идентификатор товара. 'product_id' остаётся в
+    # payload на окно совместимости и помечен как deprecated.
+    product_uuid = serializers.UUIDField(
+        source='product.uuid', read_only=True,
+    )
     helpful_score = serializers.IntegerField(read_only=True)
     # my_vote заполняется в view ('yes'/'no'/None)
     my_vote = serializers.CharField(
@@ -115,6 +133,7 @@ class ReviewListSerializer(serializers.ModelSerializer):
             'id',
             'user_id',
             'user_email',
+            'product_uuid',
             'product_id',
             'rating',
             'title',
@@ -134,6 +153,10 @@ class ReviewSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(
         source='user.email', read_only=True,
     )
+    # F-8 (#73): публичный идентификатор товара; 'product_id' — deprecated.
+    product_uuid = serializers.UUIDField(
+        source='product.uuid', read_only=True,
+    )
     helpful_score = serializers.IntegerField(read_only=True)
     # my_vote заполняется в view ('yes'/'no'/None)
     my_vote = serializers.CharField(
@@ -148,6 +171,7 @@ class ReviewSerializer(serializers.ModelSerializer):
             'id',
             'user_id',
             'user_email',
+            'product_uuid',
             'product_id',
             'rating',
             'title',

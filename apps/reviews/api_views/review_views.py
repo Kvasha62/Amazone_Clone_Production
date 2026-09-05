@@ -33,6 +33,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.identifiers import parse_uuid
 from apps.core.pagination import (
     build_paginated_response_data,
     ensure_deterministic_ordering,
@@ -112,8 +113,8 @@ class ReviewListView(APIView):
         GET /api/v1/reviews/
 
         Query params:
-          ?product_id=1        — отзывы на товар (числовой PK)
-          ?product_uuid=abc    — отзывы на товар (UUID)
+          ?product_uuid=<uuid> — отзывы на товар (канонический идентификатор)
+          ?product_id=1        — DEPRECATED: отзывы на товар (числовой PK)
           ?user_id=2           — отзывы пользователя
           ?rating=5            — только 5-звёздочные
           ?rating_gte=4        — рейтинг ≥ 4
@@ -123,29 +124,37 @@ class ReviewListView(APIView):
           ?page=1              — страница
           ?page_size=20        — размер страницы
         """
-        qs = Review.objects.approved().with_user()
+        qs = Review.objects.approved().with_user().with_product()
 
-        # ── Фильтр по товару (PK) ──
+        # ── Фильтр по товару (F-8, #73) ──
+        # product_uuid — канонический публичный идентификатор товара,
+        # product_id — устаревший целочисленный PK. Оба сразу → 400,
+        # чтобы не было неоднозначности «какой из них выиграл».
         product_id = request.query_params.get('product_id')
-        if product_id:
+        product_uuid = request.query_params.get('product_uuid')
+
+        if product_id and product_uuid:
+            raise ValidationError({
+                'product_uuid': (
+                    'Укажите либо product_uuid, либо product_id (устар.), '
+                    'но не оба.'
+                ),
+            })
+
+        if product_uuid:
+            parsed_uuid = parse_uuid(product_uuid)
+            if parsed_uuid is None:
+                raise ValidationError({'product_uuid': 'Некорректный product_uuid.'})
+            product = Product.objects.filter(uuid=parsed_uuid).first()
+            if product is None:
+                qs = qs.none()
+            else:
+                qs = qs.for_product_id(product.pk)
+        elif product_id:
             try:
                 qs = qs.for_product_id(int(product_id))
             except (ValueError, TypeError):
                 raise ValidationError({'product_id': 'Некорректный product_id.'})
-
-        # ── Фильтр по товару (UUID) — для React-фронтенда ──
-        product_uuid = request.query_params.get('product_uuid')
-        if product_uuid and not product_id:
-            try:
-                import uuid as _uuid
-                _uuid.UUID(str(product_uuid))  # валидация формата
-                product = Product.objects.filter(uuid=product_uuid).first()
-                if product:
-                    qs = qs.for_product_id(product.pk)
-                else:
-                    qs = qs.none()
-            except (ValueError, AttributeError):
-                qs = qs.none()
 
         # ── Фильтр по пользователю ──
         user_id = request.query_params.get('user_id')
@@ -256,7 +265,9 @@ class ReviewListView(APIView):
         input_ser.is_valid(raise_exception=True)
         data = input_ser.validated_data
 
-        # 🔴 Поддержка product_uuid — для React-фронтенда
+        # F-8 (#73): product_uuid — канонический идентификатор товара,
+        # product_id — устаревший вариант. Взаимоисключимость и наличие
+        # ровно одного из них проверяет CreateReviewInputSerializer.
         product_uuid = data.get('product_uuid')
         product_id = data.get('product_id')
 
@@ -265,13 +276,11 @@ class ReviewListView(APIView):
                 product = Product.objects.get(uuid=product_uuid)
             except Product.DoesNotExist:
                 raise NotFound('Товар не найден.')
-        elif product_id:
+        else:
             try:
                 product = Product.objects.get(pk=product_id)
             except Product.DoesNotExist:
                 raise NotFound('Товар не найден.')
-        else:
-            raise ValidationError('Укажите product_id или product_uuid.')
 
         review = ReviewService.create_review(
             user=request.user,

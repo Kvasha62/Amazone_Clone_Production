@@ -9,9 +9,14 @@
 #   POST   /api/v1/shipping/calculate/                   — расчёт стоимости
 #   GET    /api/v1/shipping/shipments/                   — список отправлений
 #   POST   /api/v1/shipping/shipments/                   — создать (staff)
-#   GET    /api/v1/shipping/shipments/{id}/              — детали
-#   PATCH  /api/v1/shipping/shipments/{id}/status/       — статус (staff)
-#   POST   /api/v1/shipping/shipments/{id}/tracking/     — трек-номер (staff)
+#   GET    /api/v1/shipping/shipments/{shipment}/            — детали
+#   PATCH  /api/v1/shipping/shipments/{shipment}/status/      — статус (staff)
+#   POST   /api/v1/shipping/shipments/{shipment}/tracking/    — трек-номер (staff)
+#
+# ИДЕНТИФИКАТОР ОТПРАВЛЕНИЯ (F-8, issue #73):
+#   {shipment} — публичный internal_tracking (SHP-00000001).
+#   Числовой PK всё ещё принимается тем же маршрутом ради обратной
+#   совместимости, но считается устаревшим.
 #   GET    /api/v1/shipping/track/{tracking}/            — отслеживание (public)
 #
 # 📖 https://docs.djangoproject.com/en/stable/topics/http/urls/
@@ -40,14 +45,19 @@ urlpatterns = [
     # ── Отправления ──
     path('shipments/', ShipmentListView.as_view(), name='shipment-list'),
     path('shipments/create/', ShipmentCreateView.as_view(), name='shipment-create'),
-    path('shipments/<int:pk>/', ShipmentDetailView.as_view(), name='shipment-detail'),
+    # <str:shipment> принимает публичный SHP-номер и (deprecated) числовой PK.
     path(
-        'shipments/<int:pk>/status/',
+        'shipments/<str:shipment>/',
+        ShipmentDetailView.as_view(),
+        name='shipment-detail',
+    ),
+    path(
+        'shipments/<str:shipment>/status/',
         ShipmentStatusView.as_view(),
         name='shipment-status',
     ),
     path(
-        'shipments/<int:pk>/tracking/',
+        'shipments/<str:shipment>/tracking/',
         ShipmentTrackingView.as_view(),
         name='shipment-tracking',
     ),

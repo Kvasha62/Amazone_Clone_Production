@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from apps.core.identifiers import OrderReferenceSerializerMixin
 from apps.shipping.models import Shipment, ShippingMethod, ShippingZone
 
 
@@ -151,12 +152,13 @@ class ShippingCostResponseSerializer(serializers.Serializer):
 # Shipment
 # ================================================================
 
-class ShipmentCreateSerializer(serializers.Serializer):
-    """Запрос создания отправления."""
+class ShipmentCreateSerializer(OrderReferenceSerializerMixin):
+    """Запрос создания отправления.
 
-    order_id = serializers.IntegerField(
-        help_text='ID заказа.',
-    )
+    ССЫЛКА НА ЗАКАЗ (F-8, issue #73):
+      order_number (``ORD-000001``) — канонический публичный идентификатор;
+      order_id — устаревший целочисленный PK (принимается, deprecated).
+    """
     method_id = serializers.IntegerField(
         help_text='ID способа доставки.',
     )
@@ -191,6 +193,9 @@ class ShipmentListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Shipment
         fields = (
+            # F-8 (#73): 'internal_tracking' (SHP-00000001) — публичный
+            # идентификатор отправления. 'id' (целочисленный PK) остаётся в
+            # payload на окно совместимости и помечен как deprecated.
             'id', 'internal_tracking', 'tracking_number',
             'order_number', 'method_name', 'status',
             'status_display', 'shipping_cost',

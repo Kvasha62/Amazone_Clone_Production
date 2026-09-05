@@ -6,9 +6,9 @@
 #   • POST /api/v1/shipping/calculate/
 #   • GET /api/v1/shipping/shipments/
 #   • POST /api/v1/shipping/shipments/create/
-#   • GET /api/v1/shipping/shipments/{id}/
-#   • PATCH /api/v1/shipping/shipments/{id}/status/
-#   • POST /api/v1/shipping/shipments/{id}/tracking/
+#   • GET /api/v1/shipping/shipments/{shipment}/
+#   • PATCH /api/v1/shipping/shipments/{shipment}/status/
+#   • POST /api/v1/shipping/shipments/{shipment}/tracking/
 #   • GET /api/v1/shipping/track/{tracking}/
 #
 # 📖 https://www.django-rest-framework.org/api-guide/testing/
@@ -136,10 +136,10 @@ class ShipmentCreateAPITests(TestCase):
         self.order = create_test_order(self.user, status='confirmed')
 
     def test_create_success(self):
-        """Успешное создание отправления (staff)."""
+        """Успешное создание отправления (staff) по order_number (F-8, #73)."""
         url = reverse('shipping:shipment-create')
         data = {
-            'order_id': self.order.pk,
+            'order_number': self.order.order_number,
             'method_id': self.method.pk,
         }
         response = self.client.post(url, data, format='json')
@@ -162,11 +162,47 @@ class ShipmentCreateAPITests(TestCase):
         """Ошибка при несуществующем заказе."""
         url = reverse('shipping:shipment-create')
         data = {
-            'order_id': 99999,
+            'order_number': 'ORD-999999',
             'method_id': self.method.pk,
         }
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_create_with_legacy_order_id_still_works(self):
+        """DEPRECATED order_id всё ещё принимается (окно совместимости)."""
+        url = reverse('shipping:shipment-create')
+        data = {
+            'order_id': self.order.pk,
+            'method_id': self.method.pk,
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_create_rejects_both_order_identifiers(self):
+        """order_number + order_id одновременно → 400."""
+        url = reverse('shipping:shipment-create')
+        data = {
+            'order_number': self.order.order_number,
+            'order_id': self.order.pk,
+            'method_id': self.method.pk,
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_requires_order_reference(self):
+        """Ни order_number, ни order_id → 400."""
+        url = reverse('shipping:shipment-create')
+        response = self.client.post(
+            url, {'method_id': self.method.pk}, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_rejects_malformed_order_number(self):
+        """Некорректный формат order_number → 400, а не 404."""
+        url = reverse('shipping:shipment-create')
+        data = {'order_number': 'not-an-order', 'method_id': self.method.pk}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 class ShipmentDetailAPITests(TestCase):
@@ -181,14 +217,39 @@ class ShipmentDetailAPITests(TestCase):
 
     def test_detail_success(self):
         """Успешное получение деталей."""
-        url = reverse('shipping:shipment-detail', kwargs={'pk': self.shipment.pk})
+        url = reverse(
+            'shipping:shipment-detail',
+            kwargs={'shipment': self.shipment.internal_tracking},
+        )
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['internal_tracking'], self.shipment.internal_tracking)
 
+    def test_detail_by_legacy_pk_still_works(self):
+        """DEPRECATED: числовой PK в пути всё ещё резолвится (F-8, #73)."""
+        url = reverse(
+            'shipping:shipment-detail', kwargs={'shipment': str(self.shipment.pk)},
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data['internal_tracking'], self.shipment.internal_tracking,
+        )
+
+    def test_detail_garbage_identifier_returns_404(self):
+        """Мусорный идентификатор → канонический 404, а не 500."""
+        url = reverse(
+            'shipping:shipment-detail', kwargs={'shipment': 'not-an-id'},
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data['error']['code'], 'not_found')
+
     def test_detail_not_found(self):
         """NotFound для несуществующего отправления."""
-        url = reverse('shipping:shipment-detail', kwargs={'pk': 99999})
+        url = reverse(
+            'shipping:shipment-detail', kwargs={'shipment': 'SHP-09999999'},
+        )
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -206,7 +267,10 @@ class ShipmentStatusAPITests(TestCase):
 
     def test_transition_success(self):
         """Успешный переход статуса."""
-        url = reverse('shipping:shipment-status', kwargs={'pk': self.shipment.pk})
+        url = reverse(
+            'shipping:shipment-status',
+            kwargs={'shipment': self.shipment.internal_tracking},
+        )
         data = {'status': 'in_transit'}
         response = self.client.patch(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -214,7 +278,10 @@ class ShipmentStatusAPITests(TestCase):
 
     def test_transition_invalid(self):
         """Недопустимый переход → 400."""
-        url = reverse('shipping:shipment-status', kwargs={'pk': self.shipment.pk})
+        url = reverse(
+            'shipping:shipment-status',
+            kwargs={'shipment': self.shipment.internal_tracking},
+        )
         data = {'status': 'delivered'}  # preparing → delivered: invalid
         response = self.client.patch(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -233,7 +300,10 @@ class ShipmentTrackingAPITests(TestCase):
 
     def test_update_tracking_success(self):
         """Успешное обновление трек-номера."""
-        url = reverse('shipping:shipment-tracking', kwargs={'pk': self.shipment.pk})
+        url = reverse(
+            'shipping:shipment-tracking',
+            kwargs={'shipment': self.shipment.internal_tracking},
+        )
         data = {'tracking_number': 'TRACK-99999'}
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)

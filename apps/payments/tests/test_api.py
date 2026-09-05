@@ -83,6 +83,60 @@ class PaymentListAPITests(TestCase):
         )
 
     @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_by_order_number(self):
+        """F-8 (#73): канонический order_number принимается."""
+        self.client.force_authenticate(self.user)
+        data = {
+            'order_number': self.order.order_number,
+            'amount': '1000.00',
+        }
+        resp = self.client.post(self.url, data, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        payment = Payment.objects.get(pk=resp.data['id'])
+        self.assertEqual(payment.order_id, self.order.pk)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_rejects_both_order_identifiers(self):
+        """order_number + order_id одновременно → 400 (F-8, #73)."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            self.url,
+            {
+                'order_number': self.order.order_number,
+                'order_id': self.order.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data['error']['code'], CODE_VALIDATION)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_malformed_order_number_returns_400(self):
+        """Некорректный формат order_number → 400, а не 404 (F-8, #73)."""
+        self.client.force_authenticate(self.user)
+        resp = self.client.post(
+            self.url, {'order_number': '12345'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data['error']['code'], CODE_VALIDATION)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
+    def test_create_payment_by_order_number_other_user_returns_404(self):
+        """Чужой заказ по order_number → 404 (owner scoping сохранён)."""
+        self.client.force_authenticate(self.user)
+        other_order = create_test_order(create_test_user())
+        resp = self.client.post(
+            self.url,
+            {'order_number': other_order.order_number},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(resp.data['error']['code'], CODE_NOT_FOUND)
+        self.assertEqual(Payment.objects.count(), 0)
+
+    @override_settings(DEFAULT_THROTTLE_CLASSES=[])
     def test_create_payment_without_amount_uses_order_total(self):
         """Если amount не указан — берётся из order.total."""
         self.client.force_authenticate(self.user)
@@ -171,7 +225,7 @@ class PaymentListAPITests(TestCase):
 
     @override_settings(DEFAULT_THROTTLE_CLASSES=[])
     def test_create_payment_missing_order_id_returns_400(self):
-        """Некорректный вход (нет order_id) → 400 validation envelope."""
+        """Некорректный вход (нет ссылки на заказ) → 400 validation envelope."""
         self.client.force_authenticate(self.user)
         resp = self.client.post(
             self.url, {'amount': '1000.00'}, format='json',

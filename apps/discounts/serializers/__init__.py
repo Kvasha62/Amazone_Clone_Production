@@ -4,6 +4,7 @@ from apps.discounts.serializers.discount_serializers import (
     CouponSerializer,
     PreviewDiscountInputSerializer,
     PreviewDiscountOutputSerializer,
+    RemoveCouponInputSerializer,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     'CouponSerializer',
     'PreviewDiscountInputSerializer',
     'PreviewDiscountOutputSerializer',
+    'RemoveCouponInputSerializer',
 ]

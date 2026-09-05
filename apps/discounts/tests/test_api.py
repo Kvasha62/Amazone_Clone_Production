@@ -34,6 +34,63 @@ class CouponApplyAPITests(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def test_apply_coupon_by_order_number(self):
+        """F-8 (#73): канонический order_number принимается."""
+        create_test_coupon(code='NUM10', discount_value=Decimal('10'))
+        resp = self.client.post(self.url, {
+            'code': 'NUM10', 'order_number': self.order.order_number,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['order_number'], self.order.order_number)
+        self.assertEqual(resp.data['discount'], '100.00')
+
+    def test_apply_rejects_both_order_identifiers(self):
+        """order_number + order_id одновременно → 400 (F-8, #73)."""
+        create_test_coupon(code='BOTH10', discount_value=Decimal('10'))
+        resp = self.client.post(self.url, {
+            'code': 'BOTH10',
+            'order_number': self.order.order_number,
+            'order_id': self.order.pk,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_apply_requires_order_reference(self):
+        """Ни order_number, ни order_id → 400 (F-8, #73)."""
+        create_test_coupon(code='NOREF', discount_value=Decimal('10'))
+        resp = self.client.post(self.url, {'code': 'NOREF'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_remove_coupon_by_order_number(self):
+        """POST /discounts/remove/ принимает order_number (F-8, #73)."""
+        create_test_coupon(code='RM10', discount_value=Decimal('10'))
+        self.client.post(self.url, {
+            'code': 'RM10', 'order_number': self.order.order_number,
+        }, format='json')
+
+        remove_url = reverse('discounts:coupon-remove')
+        resp = self.client.post(remove_url, {
+            'order_number': self.order.order_number,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['order_number'], self.order.order_number)
+        self.assertEqual(resp.data['discount'], '0.00')
+
+    def test_remove_requires_order_reference(self):
+        """POST /discounts/remove/ без ссылки на заказ → 400."""
+        remove_url = reverse('discounts:coupon-remove')
+        resp = self.client.post(remove_url, {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_remove_other_users_order(self):
+        """Чужой заказ при снятии скидки → 404."""
+        other = create_test_user()
+        order = create_test_order(other, total=Decimal('1000.00'))
+        remove_url = reverse('discounts:coupon-remove')
+        resp = self.client.post(remove_url, {
+            'order_number': order.order_number,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_apply_other_users_order(self):
         other = create_test_user()
         order = create_test_order(other, total=Decimal('1000.00'))

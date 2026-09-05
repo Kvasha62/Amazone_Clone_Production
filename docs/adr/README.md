@@ -11,6 +11,7 @@ new design or change application behavior.
 - [ADR-003 — Pricing and Review Concurrency Consistency](ADR-003-pricing-and-review-concurrency-consistency.md)
 - [ADR-004 — Authenticate and Idempotently Process Payment Webhooks](ADR-004-secure-idempotent-payment-webhooks.md)
 - [ADR-005 — Allocate Order Numbers from a PostgreSQL Sequence](ADR-005-order-number-allocation-sequence.md)
+- [ADR-006 — Public Resource Identifiers for API v1](ADR-006-public-resource-identifiers.md)
 
 ## Naming
 

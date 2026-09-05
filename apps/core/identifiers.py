@@ -1,0 +1,128 @@
+"""Cross-context identifier contract for API v1 (API-01 / F-8, issue #73).
+
+Background
+----------
+API-01 documented gap **G-23** ("identifier drift across bounded contexts"):
+
+* catalog product payloads serialize ``id`` as the product **UUID**, while
+  ``id`` means an integer PK everywhere else;
+* order URLs use the public ``order_number`` (``ORD-000001``) but
+  ``POST /payments/``, ``POST /discounts/apply|remove/`` and
+  ``POST /shipping/shipments/create/`` took the integer ``order_id``;
+* shipment routes exposed the raw integer PK in the path;
+* reviews accepted both ``product_id`` (int PK) and ``product_uuid``.
+
+Frozen contract (F-8)
+---------------------
+1. **Order** — the public identifier is ``order_number`` (``ORD-000001``)
+   in *paths and request bodies alike*.  The integer PK is internal.
+2. **Shipment** — the public identifier is ``internal_tracking``
+   (``SHP-00000001``).  The integer PK is internal.
+3. **Product** — the public identifier is the **UUID**.  Catalog payloads keep
+   serializing it as ``id`` (that is normative, not a bug), and reviews
+   reference products by UUID.
+4. **Legacy integer references stay accepted for one deprecation window.**
+   ``order_id`` / ``product_id`` request fields and numeric shipment path
+   segments keep working, but they are deprecated: clients must migrate to the
+   public identifiers above.  Responses always echo the public identifier.
+
+This module holds the shared primitives so every bounded context resolves
+those identifiers identically.
+"""
+
+from __future__ import annotations
+
+import re
+import uuid as uuid_module
+
+from rest_framework import serializers
+
+# ``ORD-`` + zero-padded sequence (apps.orders.constants.ORDER_NUMBER_PREFIX /
+# ORDER_NUMBER_DIGITS).  Kept as a permissive "one or more digits" pattern so a
+# sequence that grows past the padding width still matches.
+ORDER_NUMBER_RE = re.compile(r'^ORD-\d+$')
+
+# ``SHP-`` + zero-padded sequence (apps.shipping.constants).
+SHIPMENT_NUMBER_RE = re.compile(r'^SHP-\d+$')
+
+# Максимальная длина публичных идентификаторов — совпадает с max_length
+# соответствующих полей модели (Order.order_number, Shipment.internal_tracking).
+PUBLIC_IDENTIFIER_MAX_LENGTH = 20
+
+
+def is_order_number(value: object) -> bool:
+    """True, если ``value`` выглядит как публичный номер заказа ``ORD-000001``."""
+    return bool(ORDER_NUMBER_RE.match(str(value or '')))
+
+
+def is_shipment_number(value: object) -> bool:
+    """True, если ``value`` выглядит как публичный номер отправления ``SHP-00000001``."""
+    return bool(SHIPMENT_NUMBER_RE.match(str(value or '')))
+
+
+def parse_uuid(value: object) -> uuid_module.UUID | None:
+    """Возвращает ``UUID`` или ``None``, если значение не UUID.
+
+    Не бросает исключение: вызывающий код сам решает, что делать с
+    некорректным идентификатором (404 или 400).
+    """
+    if isinstance(value, uuid_module.UUID):
+        return value
+    try:
+        return uuid_module.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+class OrderReferenceSerializerMixin(serializers.Serializer):
+    """Ссылка на заказ в теле запроса.
+
+    КОНТРАКТ (F-8):
+      • ``order_number`` — канонический публичный идентификатор (``ORD-000001``);
+      • ``order_id`` — устаревший целочисленный PK, принимается ради
+        обратной совместимости.
+
+    Ровно одно из двух полей обязано присутствовать; указание обоих — 400,
+    чтобы не было неоднозначности «какой из них выиграл».
+    """
+
+    order_number = serializers.CharField(
+        required=False,
+        max_length=PUBLIC_IDENTIFIER_MAX_LENGTH,
+        help_text='Публичный номер заказа (ORD-000001). Канонический идентификатор.',
+    )
+    order_id = serializers.IntegerField(
+        required=False,
+        help_text='DEPRECATED: целочисленный PK заказа. Используйте order_number.',
+    )
+
+    def validate(self, data):
+        data = super().validate(data)
+        order_number = data.get('order_number')
+        order_id = data.get('order_id')
+
+        if order_number and order_id:
+            raise serializers.ValidationError(
+                'Укажите либо order_number, либо order_id (устар.), но не оба.',
+            )
+        if not order_number and not order_id:
+            raise serializers.ValidationError(
+                {'order_number': 'Обязательное поле.'},
+            )
+        if order_number and not is_order_number(order_number):
+            raise serializers.ValidationError(
+                {'order_number': 'Некорректный номер заказа. Формат: ORD-000001.'},
+            )
+        return data
+
+
+def order_reference_filters(validated_data: dict) -> dict:
+    """Строит ORM-фильтр по ссылке на заказ из провалидированных данных.
+
+    ``{'order_number': 'ORD-000001'}`` → ``{'order_number': 'ORD-000001'}``
+    ``{'order_id': 7}``                → ``{'pk': 7}``
+    """
+    order_number = validated_data.get('order_number')
+    if order_number:
+        return {'order_number': order_number}
+    return {'pk': validated_data['order_id']}

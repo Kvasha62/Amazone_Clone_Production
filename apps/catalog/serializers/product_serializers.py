@@ -241,15 +241,20 @@ class ProductListSerializer(serializers.ModelSerializer):
     # Frontend expects enum string: 'active', 'draft', etc.
     status = serializers.CharField(read_only=True)
 
-    # id — маппим uuid на id для frontend удобства
-    # Frontend использует `id` как публичный идентификатор.
+    # id — маппим uuid на id для frontend удобства.
+    # F-8 (#73): это НОРМАТИВНО — публичный идентификатор товара в API v1
+    # это UUID, и каталог отдаёт его как `id`. Целочисленный PK товара
+    # наружу не выходит. Дублирующее поле `uuid` отдаётся явно, чтобы
+    # клиенту не приходилось полагаться на «id здесь означает UUID».
     id = serializers.UUIDField(source='uuid', read_only=True)
+    uuid = serializers.UUIDField(read_only=True)
 
     class Meta:
         model = Product
         # Поля для listing-карточки товара:
         fields = (
             'id',
+            'uuid',
             'name',
             'slug',
             'brand_name',

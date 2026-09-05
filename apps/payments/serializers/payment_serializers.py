@@ -33,6 +33,7 @@ from apps.payments.constants import (
     PAYMENT_METHOD_CARD,
     PAYMENT_STATUS_SUCCEEDED,
 )
+from apps.core.identifiers import OrderReferenceSerializerMixin
 from apps.payments.models import Payment, PaymentEvent
 from apps.payments.models.payment import PaymentStatus
 
@@ -41,21 +42,23 @@ from apps.payments.models.payment import PaymentStatus
 # INPUT-СЕРИАЛИЗАТОРЫ
 # ==============================================================
 
-class CreatePaymentInputSerializer(serializers.Serializer):
+class CreatePaymentInputSerializer(OrderReferenceSerializerMixin):
     """
     Валидация тела POST /api/v1/payments/.
 
-    ФОРМАТ ЗАПРОСА:
+    ФОРМАТ ЗАПРОСА (F-8, issue #73):
         {
-            "order_id": 1,
+            "order_number": "ORD-000001", // канонический идентификатор заказа
             "amount": "1500.00",        // опционально, default = order.total
             "method": "card",            // опционально, default = "card"
             "provider": "mock"           // опционально, default = "mock"
         }
+
+    ССЫЛКА НА ЗАКАЗ (F-8):
+      order_number — канонический публичный идентификатор;
+      order_id — устаревший целочисленный PK, всё ещё принимается.
+      Ровно одно из полей; оба сразу → 400.
     """
-    order_id = serializers.IntegerField(
-        help_text='ID заказа для оплаты.',
-    )
     amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,

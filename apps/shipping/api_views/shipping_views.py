@@ -6,9 +6,13 @@
 #   POST /api/v1/shipping/calculate/              — расчёт стоимости
 #   GET  /api/v1/shipping/shipments/              — список отправлений
 #   POST /api/v1/shipping/shipments/              — создать отправление (staff)
-#   GET  /api/v1/shipping/shipments/{id}/         — детали отправления
-#   PATCH /api/v1/shipping/shipments/{id}/status/ — переход статуса (staff)
-#   POST /api/v1/shipping/shipments/{id}/tracking/— обновить трек-номер (staff)
+#   GET  /api/v1/shipping/shipments/{shipment}/         — детали отправления
+#   PATCH /api/v1/shipping/shipments/{shipment}/status/ — переход статуса (staff)
+#   POST /api/v1/shipping/shipments/{shipment}/tracking/— трек-номер (staff)
+#
+# ИДЕНТИФИКАТОР ОТПРАВЛЕНИЯ (F-8, issue #73):
+#   {shipment} — публичный internal_tracking (SHP-00000001);
+#   числовой PK принимается как deprecated-вариант.
 #   GET  /api/v1/shipping/track/{tracking}/       — отслеживание (публичный)
 #
 # 📖 https://www.django-rest-framework.org/api-guide/views/
@@ -30,6 +34,7 @@ from apps.core.pagination import (
 )
 from apps.core.serializers import PaginationResponseSerializer
 
+from apps.core.identifiers import is_shipment_number, order_reference_filters
 from apps.orders.models import Order
 from apps.shipping.models import Shipment, ShippingMethod
 from apps.shipping.serializers import (
@@ -56,6 +61,35 @@ except ImportError:
         return decorator
 
 logger = logging.getLogger(__name__)
+
+
+def _shipment_lookup(shipment: str) -> dict:
+    """ORM-фильтр по публичному идентификатору отправления (F-8, #73).
+
+    ``SHP-00000001`` → ``{'internal_tracking': 'SHP-00000001'}``
+    ``"42"``         → ``{'pk': 42}`` (DEPRECATED: сырой целочисленный PK)
+
+    Любое другое значение никогда не совпадёт ни с одним отправлением —
+    возвращаем заведомо пустой фильтр, чтобы вызывающий код отдал
+    канонический ``404 not_found`` (а не 500 на приведении типов).
+    """
+    value = str(shipment)
+    if is_shipment_number(value):
+        return {'internal_tracking': value}
+    if value.isdigit():
+        return {'pk': int(value)}
+    return {'pk': None}
+
+
+def _get_shipment(queryset, shipment: str) -> Shipment:
+    """Возвращает отправление по публичному идентификатору либо 404."""
+    lookup = _shipment_lookup(shipment)
+    if lookup.get('pk', True) is None:
+        raise NotFound('Отправление не найдено.')
+    try:
+        return queryset.get(**lookup)
+    except Shipment.DoesNotExist:
+        raise NotFound('Отправление не найдено.')
 
 
 # ================================================================
@@ -209,9 +243,10 @@ class ShipmentCreateView(APIView):
         input_ser.is_valid(raise_exception=True)
         data = input_ser.validated_data
 
-        # Получаем заказ
+        # Получаем заказ по публичному order_number (F-8, #73)
+        # либо по устаревшему целочисленному order_id.
         try:
-            order = Order.objects.get(pk=data['order_id'])
+            order = Order.objects.get(**order_reference_filters(data))
         except Order.DoesNotExist:
             raise NotFound('Заказ не найден.')
 
@@ -240,29 +275,28 @@ class ShipmentCreateView(APIView):
 )
 class ShipmentDetailView(APIView):
     """
-    GET /api/v1/shipping/shipments/{id}/
+    GET /api/v1/shipping/shipments/{shipment}/
 
     Детали отправления. Пользователь видит только свои,
     staff — все.
+
+    {shipment} — публичный internal_tracking (SHP-00000001);
+    числовой PK принимается как deprecated-вариант (F-8, #73).
     """
     permission_classes = (IsAuthenticated,)
 
-    def get(self, request, pk):
-        try:
-            if request.user.is_staff:
-                shipment = Shipment.objects.select_related(
-                    'order', 'method', 'method__zone', 'user',
-                ).get(pk=pk)
-            else:
-                shipment = (
-                    request.user.shipments
-                    .select_related('order', 'method', 'method__zone', 'user')
-                    .get(pk=pk)
-                )
-        except Shipment.DoesNotExist:
-            raise NotFound('Отправление не найдено.')
+    def get(self, request, shipment):
+        if request.user.is_staff:
+            queryset = Shipment.objects.select_related(
+                'order', 'method', 'method__zone', 'user',
+            )
+        else:
+            queryset = request.user.shipments.select_related(
+                'order', 'method', 'method__zone', 'user',
+            )
 
-        serializer = ShipmentDetailSerializer(shipment)
+        shipment_obj = _get_shipment(queryset, shipment)
+        serializer = ShipmentDetailSerializer(shipment_obj)
         return Response(serializer.data)
 
 
@@ -279,18 +313,18 @@ class ShipmentDetailView(APIView):
 )
 class ShipmentStatusView(APIView):
     """
-    PATCH /api/v1/shipping/shipments/{id}/status/
+    PATCH /api/v1/shipping/shipments/{shipment}/status/
 
     Переводит отправление в новый статус по правилам FSM.
     Только для staff.
+
+    {shipment} — публичный internal_tracking (SHP-00000001);
+    числовой PK принимается как deprecated-вариант (F-8, #73).
     """
     permission_classes = (IsAdminUser,)
 
-    def patch(self, request, pk):
-        try:
-            shipment = Shipment.objects.get(pk=pk)
-        except Shipment.DoesNotExist:
-            raise NotFound('Отправление не найдено.')
+    def patch(self, request, shipment):
+        shipment = _get_shipment(Shipment.objects.all(), shipment)
 
         input_ser = TransitionStatusSerializer(data=request.data)
         input_ser.is_valid(raise_exception=True)
@@ -315,18 +349,18 @@ class ShipmentStatusView(APIView):
 )
 class ShipmentTrackingView(APIView):
     """
-    POST /api/v1/shipping/shipments/{id}/tracking/
+    POST /api/v1/shipping/shipments/{shipment}/tracking/
 
     Обновляет трек-номер отправления.
     Только для staff.
+
+    {shipment} — публичный internal_tracking (SHP-00000001);
+    числовой PK принимается как deprecated-вариант (F-8, #73).
     """
     permission_classes = (IsAdminUser,)
 
-    def post(self, request, pk):
-        try:
-            shipment = Shipment.objects.get(pk=pk)
-        except Shipment.DoesNotExist:
-            raise NotFound('Отправление не найдено.')
+    def post(self, request, shipment):
+        shipment = _get_shipment(Shipment.objects.all(), shipment)
 
         input_ser = TrackingUpdateSerializer(data=request.data)
         input_ser.is_valid(raise_exception=True)
