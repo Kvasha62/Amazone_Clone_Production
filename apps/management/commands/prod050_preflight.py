@@ -26,7 +26,9 @@ _WRITE_SQL = re.compile(
     r"TRUNCATE|REINDEX|GRANT|REVOKE|COMMENT|VACUUM|CALL|COPY\s+[^\n]+\s+FROM)",
     re.IGNORECASE | re.DOTALL,
 )
-FAIL_CLASSIFICATIONS = frozenset({"UNPROVABLE", "AMBIGUOUS", "CONFLICT"})
+FAIL_CLASSIFICATIONS = frozenset(
+    {"UNPROVABLE", "AMBIGUOUS", "CONFLICT", "UNKNOWN"}
+)
 
 
 def _deny_writes(execute, sql, params, many, context):
@@ -71,17 +73,29 @@ def build_report() -> dict[str, Any]:
             "merchant_foundation", "active_legal_entities",
             f"Expected exactly one active LegalEntity; found {len(active_entities)}.",
         ))
-    elif not active_entities[0].accounting_currency_id:
-        findings.append(_finding(
-            "UNPROVABLE", "LegalEntity", active_entities[0].pk,
-            "Active LegalEntity has no Accounting Currency.",
-        ))
+    for entity in active_entities:
+        if entity.accounting_currency_id:
+            findings.append(_finding(
+                "PROVEN", "LegalEntity", entity.pk,
+                "Active LegalEntity has an authoritative Accounting Currency.",
+            ))
+        else:
+            findings.append(_finding(
+                "UNPROVABLE", "LegalEntity", entity.pk,
+                "Active LegalEntity has no Accounting Currency.",
+            ))
 
     if len(stores) != 1:
         findings.append(_finding(
             "CONFLICT" if len(stores) > 1 else "UNPROVABLE",
             "merchant_foundation", "stores",
             f"Expected exactly one first-release Store; found {len(stores)}.",
+        ))
+    for store in stores:
+        findings.append(_finding(
+            "PROVEN", "Store", store.pk,
+            "Store has exactly one persisted LegalEntity relationship; this does "
+            "not prove historical Product ownership.",
         ))
 
     for market in markets:
@@ -90,6 +104,12 @@ def build_report() -> dict[str, Any]:
             findings.append(_finding(
                 "UNPROVABLE", "StoreMarket", market.pk,
                 "Active StoreMarket has no enabled payment currencies.",
+            ))
+        else:
+            findings.append(_finding(
+                "PROVEN", "StoreMarket", market.pk,
+                "Persisted StoreMarket configuration is structurally valid; market "
+                "and payment-currency membership do not prove Product ownership.",
             ))
 
     # The current schema contains no approved, record-specific Product→Store
@@ -114,6 +134,11 @@ def build_report() -> dict[str, Any]:
             findings.append(_finding(
                 "UNPROVABLE", "ProductVariant", variant["pk"],
                 "Variant owner is unprovable because Product ownership is unprovable.",
+            ))
+        else:
+            findings.append(_finding(
+                "PROVEN", "ProductVariant", variant["pk"],
+                "Variant reaches exactly one Product with proven ownership.",
             ))
 
     accounting_code = (
@@ -145,12 +170,11 @@ def build_report() -> dict[str, Any]:
         else:
             classification = "MATCH"
             reason = "Legacy currency matches Accounting Currency through a proven owner."
-        if classification != "MATCH":
-            findings.append(_finding(classification, "Price", price.pk, reason))
+        findings.append(_finding(classification, "Price", price.pk, reason))
 
     for history in histories:
         findings.append(_finding(
-            "UNPROVABLE", "PriceHistory", history.pk,
+            "UNKNOWN", "PriceHistory", history.pk,
             "No record-specific authoritative historical-currency evidence exists; "
             "current Price or merchant configuration is not historical proof.",
         ))
@@ -205,6 +229,9 @@ class Command(BaseCommand):
             self.stdout.write("Rows examined:")
             for name, count in report["rows_examined"].items():
                 self.stdout.write(f"  {name}: {count}")
+            self.stdout.write("Classification counts:")
+            for classification, count in report["classification_counts"].items():
+                self.stdout.write(f"  {classification}: {count}")
             self.stdout.write("Findings:")
             for finding in report["findings"]:
                 self.stdout.write(
