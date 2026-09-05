@@ -21,12 +21,50 @@ The legacy system has a hard-coded RUB/USD/EUR currency choice on `Price`, while
 9. No universal two-decimal assumption is permitted.
 10. Currency validation and precision are centralized; bounded contexts must not maintain independent currency enums or RUB-specific precision rules.
 
+## Pricing Currency Authority
+
+`LegalEntity.accounting_currency` is the authoritative Accounting Currency for current commercial pricing.
+
+The accepted first-release commercial ownership path is:
+
+`Product → Store → LegalEntity → accounting_currency`
+
+`ProductVariant` and `Price` inherit that ownership through `Product`. `Price` therefore does not own an independent currency choice and must not contain a competing pricing-owned currency enum or second business source of truth.
+
+The effective current pricing currency is resolved as:
+
+`Price → ProductVariant → Product → Store → LegalEntity → accounting_currency`
+
+API/client input cannot select or override this currency. Pricing and Cart do not perform FX conversion.
+
 ## Ownership
 
 - `currencies` owns currency metadata and FX-rate records.
 - `pricing`, `cart`, `orders`, `shipping`, and `discounts` consume currency identity but do not own competing registries.
 - `payments` owns payment-currency selection and applies the registry rules at the payment boundary.
 - `refunds` preserve the original Payment Currency for buyer-facing obligations.
+- `merchants` owns LegalEntity/Store/StoreMarket commercial ownership concepts; Product's first-release commercial owner is an explicit Store reference in the catalog model.
+
+## Historical Currency Snapshots
+
+Historical monetary facts are snapshots, not live references to mutable commercial configuration.
+
+`PriceHistory.currency` is nullable solely to represent pre-existing legacy rows for which the historical currency was never persisted. Such rows remain `NULL` unless authoritative, record-specific evidence permits a targeted backfill.
+
+The following are not valid evidence for historical backfill:
+
+- current `Price.currency`;
+- current LegalEntity or Store configuration;
+- model defaults;
+- seed data or seed assumptions.
+
+All newly-created `PriceHistory` records must persist the authoritative Accounting Currency at creation time. Once persisted, the historical currency is immutable.
+
+## Legacy Price Migration
+
+Removal of the legacy `Price.currency` authority requires a fail-closed migration preflight. Every existing Price amount must be shown to be compatible with the Accounting Currency of its commercial owner before the legacy field is removed.
+
+If any existing Price is incompatible, ambiguous, or cannot be established as compatible, the migration stops. Existing amounts are not silently rewritten and FX conversion is not permitted as a migration mechanism.
 
 ## Historical invariants
 
@@ -39,6 +77,7 @@ This ADR does not select an FX vendor, payment provider, tax regime, or storefro
 ## Related
 
 - ADR-008 — Money, Currency and Refund Invariants
+- ADR-011 — Single LegalEntity, Store and StoreMarket in First Release
 - ADR-004 — Secure and Idempotent Payment Webhooks
 - ADR-005 — Allocate Order Numbers from a PostgreSQL Sequence
 - ADR-006 — Public Resource Identifiers for API v1
