@@ -4,7 +4,8 @@
 # Проверяет:
 #   • ShippingZone: создание, contains_region, __str__
 #   • ShippingMethod: создание, calculate_cost, estimated_days_display, __str__
-#   • Shipment: создание, авто-генерация internal_tracking, is_terminal, __str__
+#   • Shipment: создание, авто-генерация shipment_number (публичный
+#     идентификатор) и internal_tracking (внутреннее поле), is_terminal, __str__
 #
 # 📖 https://docs.djangoproject.com/en/stable/topics/testing/overview/
 # ────────────────────────────────────────────────────────────────────────

@@ -185,7 +185,9 @@ class PaymentEventAdmin(admin.ModelAdmin):
     list_filter = ('event_type',)
 
     search_fields = (
-        'payment__order_number',
+        # F-8 (#73): поле переименовано order_number → payment_number.
+        # Старый путь давал FieldError при первом же поиске в админке.
+        'payment__payment_number',
         'external_event_id',
     )
 

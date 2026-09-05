@@ -44,21 +44,21 @@ class PaymentModelTests(TestCase):
         self.assertEqual(self.payment.provider, 'mock')
         self.assertEqual(self.payment.refund_amount, Decimal('0.00'))
 
-    def test_order_number_auto_generation(self):
+    def test_payment_number_auto_generation(self):
         """payment_number генерируется автоматически в формате PAY-000001."""
         self.assertRegex(
             self.payment.payment_number,
             r'PAY-\d{6}',
         )
 
-    def test_order_number_sequential(self):
+    def test_payment_number_sequential(self):
         """Номера платежей последовательны."""
         payment2 = create_test_payment(self.order, self.user)
         seq1 = self.payment._payment_number_seq
         seq2 = payment2._payment_number_seq
         self.assertEqual(seq2, seq1 + 1)
 
-    def test_order_number_unique(self):
+    def test_payment_number_unique(self):
         """payment_number уникален — IntegrityError при дубле."""
         with self.assertRaises(IntegrityError):
             payment2 = create_test_payment(self.order, self.user)
