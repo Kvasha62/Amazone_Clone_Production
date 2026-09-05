@@ -507,8 +507,13 @@ SIMPLE_JWT = {
 SPECTACULAR_SETTINGS = {
     "TITLE": "Amazone Clone API",
     "DESCRIPTION": "Marketplace API",
+    # Existing version authority shared by OpenAPI and the health response.
     "VERSION": "1.0.0",
     "SERVE_INCLUDE_SCHEMA": False,
+    "ENUM_NAME_OVERRIDES": {
+        # Health uses the same singleton enum for status and database.
+        "HealthOkEnum": ["ok"],
+    },
 }
 
 # ==========================================================
