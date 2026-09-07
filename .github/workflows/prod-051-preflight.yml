@@ -5,22 +5,21 @@
 #
 # Purpose:
 #   Execute the existing PROD-050 management command against the real target
-#   PostgreSQL database and preserve the JSON report as a workflow artifact.
+#   PostgreSQL database from the production Docker network and preserve the
+#   JSON report as a workflow artifact.
 #
 # Safety contract:
 #   - No migrations.
-#   - No writes are intentionally issued by this workflow.
+#   - No collectstatic.
+#   - No deployment/restart of the production stack.
 #   - PROD-050 itself enforces PostgreSQL transaction READ ONLY and rejects
 #     mutating SQL through execute_wrapper.
 #   - Production DB credentials are supplied only through GitHub Secrets.
 #   - The Django SECRET_KEY used here is ephemeral and generated for the run;
 #     the real production application secret is never required.
-#   - The workflow does not deploy, restart, or modify the application.
-#
-# Network note:
-#   Use `self-hosted` when the target PostgreSQL is reachable only from the
-#   production/private network. A GitHub-hosted runner requires a reachable
-#   PostgreSQL endpoint and appropriate firewall/SSL policy.
+#   - The preflight container is temporary and is connected only to the
+#     existing production Compose network.
+#   - The production PostgreSQL service port remains unpublished to the host.
 # ────────────────────────────────────────────────────────────────────────
 
 name: PROD-051 — PostgreSQL read-only preflight
@@ -28,14 +27,6 @@ name: PROD-051 — PostgreSQL read-only preflight
 on:
   workflow_dispatch:
     inputs:
-      runner:
-        description: "Runner with network access to the target PostgreSQL"
-        required: true
-        type: choice
-        options:
-          - self-hosted
-          - ubuntu-latest
-        default: self-hosted
       target_label:
         description: "Non-secret target identifier written into the report artifact"
         required: true
@@ -56,22 +47,17 @@ concurrency:
 jobs:
   preflight:
     name: PROD-050 against target PostgreSQL
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, production-db]
+    timeout-minutes: 20
 
     env:
-      DJANGO_SETTINGS_MODULE: config.settings
-      DJANGO_DEBUG: "False"
-      DJANGO_ALLOWED_HOSTS: "localhost"
-      CORS_ALLOW_ALL_ORIGINS: "False"
-      CORS_ALLOWED_ORIGINS: "http://localhost"
-      DB_ENGINE: django.db.backends.postgresql
-      DB_NAME: ${{ secrets.PROD051_DB_NAME }}
-      DB_USER: ${{ secrets.PROD051_DB_USER }}
-      DB_PASSWORD: ${{ secrets.PROD051_DB_PASSWORD }}
-      DB_HOST: ${{ secrets.PROD051_DB_HOST }}
-      DB_PORT: ${{ secrets.PROD051_DB_PORT || '5432' }}
+      PROD_NETWORK: amazone-clone-prod_default
       PROD051_TARGET_LABEL: ${{ inputs.target_label }}
+      PROD051_DB_HOST: db
+      PROD051_DB_PORT: "5432"
+      PROD051_DB_NAME: ${{ secrets.PROD051_DB_NAME }}
+      PROD051_DB_USER: ${{ secrets.PROD051_DB_USER }}
+      PROD051_DB_PASSWORD: ${{ secrets.PROD051_DB_PASSWORD }}
 
     steps:
       - name: Require explicit confirmation
@@ -86,23 +72,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Validate Docker runtime and production network
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          docker network inspect "$PROD_NETWORK" >/dev/null
+          echo "Production Docker network is available: $PROD_NETWORK"
 
       - name: Generate ephemeral Django secret
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY' >> "$GITHUB_ENV"
-import secrets
-print(f"DJANGO_SECRET_KEY={secrets.token_urlsafe(50)}")
-PY
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import secrets
+          print(f"DJANGO_SECRET_KEY={secrets.token_urlsafe(50)}")
+          PY
 
       - name: Validate required target DB configuration
         shell: bash
@@ -110,15 +95,13 @@ PY
           REQUIRED_DB_NAME: ${{ secrets.PROD051_DB_NAME }}
           REQUIRED_DB_USER: ${{ secrets.PROD051_DB_USER }}
           REQUIRED_DB_PASSWORD: ${{ secrets.PROD051_DB_PASSWORD }}
-          REQUIRED_DB_HOST: ${{ secrets.PROD051_DB_HOST }}
         run: |
           set -euo pipefail
           missing=0
           for pair in \
             "PROD051_DB_NAME:${REQUIRED_DB_NAME}" \
             "PROD051_DB_USER:${REQUIRED_DB_USER}" \
-            "PROD051_DB_PASSWORD:${REQUIRED_DB_PASSWORD}" \
-            "PROD051_DB_HOST:${REQUIRED_DB_HOST}"; do
+            "PROD051_DB_PASSWORD:${REQUIRED_DB_PASSWORD}"; do
             name="${pair%%:*}"
             value="${pair#*:}"
             if [[ -z "$value" ]]; then
@@ -130,15 +113,41 @@ PY
             exit 1
           fi
 
-      - name: Verify Django configuration without migration
-        run: python manage.py check --fail-level WARNING
-
-      - name: Run PROD-050 read-only preflight
-        id: preflight
+      - name: Build immutable PROD-051 preflight image
         shell: bash
         run: |
+          set -euo pipefail
+          IMAGE="prod051-preflight:${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "PROD051_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          docker build --file Dockerfile.backend.prod --tag "$IMAGE" .
+
+      - name: Run PROD-050 inside production Docker network
+        id: preflight
+        shell: bash
+        env:
+          DB_NAME: ${{ secrets.PROD051_DB_NAME }}
+          DB_USER: ${{ secrets.PROD051_DB_USER }}
+          DB_PASSWORD: ${{ secrets.PROD051_DB_PASSWORD }}
+        run: |
           set +e
-          python manage.py prod050_preflight --format json > prod050-report.json
+          docker run --rm \
+            --network "$PROD_NETWORK" \
+            --env DJANGO_SETTINGS_MODULE=config.settings \
+            --env DJANGO_DEBUG=False \
+            --env DJANGO_ALLOWED_HOSTS=localhost \
+            --env CORS_ALLOW_ALL_ORIGINS=False \
+            --env CORS_ALLOWED_ORIGINS=http://localhost \
+            --env DB_ENGINE=django.db.backends.postgresql \
+            --env DB_HOST=db \
+            --env DB_PORT=5432 \
+            --env DB_NAME="$DB_NAME" \
+            --env DB_USER="$DB_USER" \
+            --env DB_PASSWORD="$DB_PASSWORD" \
+            --env DJANGO_SECRET_KEY="$DJANGO_SECRET_KEY" \
+            --env RUN_MIGRATIONS=false \
+            --env RUN_COLLECTSTATIC=false \
+            "$PROD051_IMAGE" \
+            python manage.py prod050_preflight --format json > prod050-report.json
           status=$?
           set -e
 
@@ -146,13 +155,23 @@ PY
           printf '%s\n' "GITHUB_SHA=${GITHUB_SHA}" >> prod050-run-metadata.txt
           printf '%s\n' "RUN_ID=${GITHUB_RUN_ID}" >> prod050-run-metadata.txt
           printf '%s\n' "RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT}" >> prod050-run-metadata.txt
-          printf '%s\n' "EXIT_CODE=${status}" >> prod050-run-metadata.txt
+          printf '%s\n' "PROD_NETWORK=${PROD_NETWORK}" >> prod050-run-metadata.txt
+          printf '%s\n' "DB_HOST=db" >> prod050-run-metadata.txt
+          printf '%s\n' "DB_PORT=5432" >> prod050-run-metadata.txt
           printf '%s\n' "MIGRATIONS_EXECUTED=false" >> prod050-run-metadata.txt
+          printf '%s\n' "COLLECTSTATIC_EXECUTED=false" >> prod050-run-metadata.txt
           printf '%s\n' "PRECHECK_ONLY=true" >> prod050-run-metadata.txt
+          printf '%s\n' "EXIT_CODE=${status}" >> prod050-run-metadata.txt
 
           echo "PROD-050 exit code: ${status}"
           echo "Target report saved to prod050-report.json"
           exit "${status}"
+
+      - name: Remove temporary preflight image
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          docker image rm "$PROD051_IMAGE" || true
 
       - name: Upload PROD-050 evidence
         if: ${{ always() }}
@@ -173,19 +192,22 @@ PY
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target: \`${PROD051_TARGET_LABEL}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Commit: \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Production Docker network: \`${PROD_NETWORK}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PostgreSQL endpoint: \`db:5432\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Read-only command: \`prod050_preflight --format json\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Migrations executed: **false**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Collectstatic executed: **false**" >> "$GITHUB_STEP_SUMMARY"
           echo "- Evidence artifact: \`prod-051-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`" >> "$GITHUB_STEP_SUMMARY"
 
           if [[ -f prod050-report.json ]]; then
-            python - <<'PY'
-import json
-from pathlib import Path
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
 
-report = json.loads(Path("prod050-report.json").read_text())
-print(f"Overall result: {report.get('overall_result')}")
-print(f"Audit timestamp: {report.get('audit_timestamp')}")
-print(f"Rows examined: {report.get('rows_examined')}")
-print(f"Classification counts: {report.get('classification_counts')}")
-PY
+          report = json.loads(Path("prod050-report.json").read_text())
+          print(f"Overall result: {report.get('overall_result')}")
+          print(f"Audit timestamp: {report.get('audit_timestamp')}")
+          print(f"Rows examined: {report.get('rows_examined')}")
+          print(f"Classification counts: {report.get('classification_counts')}")
+          PY
           fi
