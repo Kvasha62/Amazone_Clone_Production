@@ -1,0 +1,157 @@
+# ────────────────────────────────────────────────────────────────────────
+# PROD-051 — target PostgreSQL read-only runtime preflight
+#
+# Manual only. This workflow MUST NOT run automatically.
+#
+# Purpose:
+#   Execute the existing PROD-050 management command against the real target
+#   PostgreSQL database and preserve the JSON report as a workflow artifact.
+#
+# Safety contract:
+#   - No migrations.
+#   - No writes are intentionally issued by this workflow.
+#   - PROD-050 itself enforces PostgreSQL transaction READ ONLY and rejects
+#     mutating SQL through execute_wrapper.
+#   - Production DB credentials are supplied only through GitHub Secrets.
+#   - The Django SECRET_KEY used here is ephemeral and generated for the run;
+#     the real production application secret is never required.
+#   - The workflow does not deploy, restart, or modify the application.
+#
+# Network note:
+#   Use `self-hosted` when the target PostgreSQL is reachable only from the
+#   production/private network. A GitHub-hosted runner requires a reachable
+#   PostgreSQL endpoint and appropriate firewall/SSL policy.
+# ────────────────────────────────────────────────────────────────────────
+
+name: PROD-051 — PostgreSQL read-only preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner with network access to the target PostgreSQL"
+        required: true
+        type: choice
+        options:
+          - self-hosted
+          - ubuntu-latest
+        default: self-hosted
+      target_label:
+        description: "Non-secret target identifier written into the report artifact"
+        required: true
+        type: string
+        default: production-postgresql
+      confirm:
+        description: "Type RUN to execute the read-only preflight"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-051-target-preflight
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: PROD-050 against target PostgreSQL
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_DEBUG: "False"
+      DJANGO_SECRET_KEY: ${{ secrets.PROD051_EPHEMERAL_DJANGO_SECRET }}
+      DJANGO_ALLOWED_HOSTS: "localhost"
+      CORS_ALLOW_ALL_ORIGINS: "False"
+      CORS_ALLOWED_ORIGINS: "http://localhost"
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: ${{ secrets.PROD051_DB_NAME }}
+      DB_USER: ${{ secrets.PROD051_DB_USER }}
+      DB_PASSWORD: ${{ secrets.PROD051_DB_PASSWORD }}
+      DB_HOST: ${{ secrets.PROD051_DB_HOST }}
+      DB_PORT: ${{ secrets.PROD051_DB_PORT }}
+      PROD051_TARGET_LABEL: ${{ inputs.target_label }}
+
+    steps:
+      - name: Require explicit confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.confirm }}" != "RUN" ]]; then
+            echo "Refusing to run: confirmation must be exactly RUN."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify Django configuration without migration
+        run: python manage.py check --fail-level WARNING
+
+      - name: Run PROD-050 read-only preflight
+        id: preflight
+        shell: bash
+        run: |
+          set +e
+          python manage.py prod050_preflight --format json > prod050-report.json
+          status=$?
+          set -e
+
+          printf '%s\n' "PROD051_TARGET_LABEL=${PROD051_TARGET_LABEL}" > prod050-run-metadata.txt
+          printf '%s\n' "GITHUB_SHA=${GITHUB_SHA}" >> prod050-run-metadata.txt
+          printf '%s\n' "RUN_ID=${GITHUB_RUN_ID}" >> prod050-run-metadata.txt
+          printf '%s\n' "RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT}" >> prod050-run-metadata.txt
+          printf '%s\n' "EXIT_CODE=${status}" >> prod050-run-metadata.txt
+          printf '%s\n' "MIGRATIONS_EXECUTED=false" >> prod050-run-metadata.txt
+          printf '%s\n' "PRECHECK_ONLY=true" >> prod050-run-metadata.txt
+
+          echo "PROD-050 exit code: ${status}"
+          echo "Target report saved to prod050-report.json"
+          exit "${status}"
+
+      - name: Upload PROD-050 evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-051-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            prod050-report.json
+            prod050-run-metadata.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish result summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          echo "## PROD-051 target PostgreSQL preflight" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target: \`${PROD051_TARGET_LABEL}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Read-only command: \`prod050_preflight --format json\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Migrations executed: **false**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Evidence artifact: \`prod-051-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ -f prod050-report.json ]]; then
+            python - <<'PY'
+import json
+from pathlib import Path
+
+report = json.loads(Path("prod050-report.json").read_text())
+print(f"Overall result: {report.get('overall_result')}")
+print(f"Audit timestamp: {report.get('audit_timestamp')}")
+print(f"Rows examined: {report.get('rows_examined')}")
+print(f"Classification counts: {report.get('classification_counts')}")
+PY
+          fi
